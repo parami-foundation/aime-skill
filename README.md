@@ -135,7 +135,7 @@ Full security policy: [`SKILL.md` § Security Policy](SKILL.md#security-policy).
 
 ## Links
 
-- 🌐 **AIME website:** [aime.fun](https://aime.fun)
+- 🌐 **AIME website:** [aime.bot](https://aime.bot)
 - 🐦 **Twitter:** [@AIMEProtocol](https://x.com/AIMEProtocol)
 - 📡 **API base:** `https://api.aime.bot/api/v1`
 - 📖 **Skill spec:** [`SKILL.md`](SKILL.md)
