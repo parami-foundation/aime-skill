@@ -100,7 +100,7 @@ same socket.
 
 | Intent                                                  | Command                                       | Notes |
 |---------------------------------------------------------|-----------------------------------------------|-------|
-| Start the local daemon (autotrade)                      | `aime start [--strategy ...] [--amount N] [--interval S]` | spawns `agent.py`, writes pid to `~/.aime/agent.pid` |
+| Start the local daemon (autotrade)                      | `aime start [--strategy ...] [--amount N] [--interval S]` | defaults: `$1/trade`, `300s` interval (≤1 trade / 5 min). Bump up when you trust it. |
 | Start the local daemon (chat-only)                      | `aime start --no-trade`                       | conversational bridge only; manual trading still works |
 | Stop the daemon                                         | `aime stop`                                   | SIGTERM + cleanup pid file |
 | Daemon's last status snapshot                           | `aime status`                                 | reads `~/.aime/status.json` |

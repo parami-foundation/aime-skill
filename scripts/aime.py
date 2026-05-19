@@ -955,6 +955,13 @@ def cmd_start(args: argparse.Namespace) -> None:
     print(f"   chat socket: {'up' if chat_ok else 'not yet ready'}")
     if getattr(args, "no_trade", False):
         print("   mode: chat-only (no autonomous trades; use `aime buy`/`aime sell` for manual)")
+    else:
+        # Mirror the daemon's default-mode heads-up so the user sees the
+        # worst-case rate right after `aime start`. Values track agent.py defaults.
+        amt = args.amount if getattr(args, "amount", None) else 1.0
+        ivl = args.interval if getattr(args, "interval", None) else 300
+        max_per_hour = max(1, int(3600 / max(ivl, 1)))
+        print(f"   trading: \u2264{max_per_hour}/hr at \u2264${amt:.2f}/trade (`--no-trade` for chat-only; `aime stop` to halt)")
 
 
 def cmd_stop(args: argparse.Namespace) -> None:

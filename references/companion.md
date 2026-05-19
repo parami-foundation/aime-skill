@@ -59,6 +59,12 @@ aime start --no-trade   # chat-only: bridge + reflection, no autotrades
 aime start              # full: also runs the configured strategy
 ```
 
+Defaults for autotrade mode are intentionally tame: **`$1` per trade,
+`300s` (5 min) interval**, contrarian strategy. That's at most ~12 trades
+an hour, ~$12 at risk per hour in the absolute worst case. Crank it up
+with `--amount` / `--interval` once you've watched a few cycles and like
+what you see.
+
 The conversational commands (`ask`, `tell`, `mood`, `debate`, `brag`,
 `confess`, `memory`) work identically in both modes. The agent's
 personality, mood, and memory exist regardless of whether it's the one

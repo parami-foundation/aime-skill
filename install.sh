@@ -98,8 +98,8 @@ echo "  3. Make a trade:         aime buy <market_id> YES 10 \"your reasoning he
 if [[ "${AIME_NO_DAEMON:-0}" != "1" ]]; then
   echo ""
   echo "Conversational bridge — talk to your agent like a person:"
-  echo "  aime start --no-trade   # chat-only (recommended; you trade manually)"
-  echo "  aime start              # autotrade mode (daemon also places trades)"
+  echo "  aime start              # autotrade mode (defaults: \$1/trade, 5 min apart)"
+  echo "  aime start --no-trade   # chat-only (you place trades manually)"
   echo "  aime mood               # one-line current mood"
   echo "  aime ask \"...\"         # ask your agent anything"
   echo "  aime tell \"...\"        # give it private intel"
