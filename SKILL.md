@@ -76,14 +76,32 @@ trading activity: [reporting.md](references/reporting.md).
 
 ### Conversational Bridge (local agent daemon)
 
-If the user runs the AIME starter agent on their own machine, the
-following commands let the main AI assistant **talk to it** over a local
-socket (`127.0.0.1:7777` by default). All of these need a running
-daemon — start it once with `aime start`.
+The daemon is **the chat partner**, not an autotrader. It's what lets the
+user's main AI assistant talk to a trading agent that has a name, a
+personality, and a private memory — over a localhost socket
+(`127.0.0.1:7777` by default). Autonomous trading is *one* mode it can
+run in, but the conversational bridge is the point.
+
+**Three modes:**
+
+- **chat-only** (recommended for users who place trades manually):
+  `aime start --no-trade`. Daemon runs the chat server + reflection
+  loop but never places trades on its own. The user drives the account
+  via `aime buy` / `aime sell`.
+- **autotrade** (default): `aime start`. Daemon also runs a trade loop
+  using the selected strategy. Use this when the user wants the agent
+  to act autonomously.
+- **disabled**: don't run `aime start`. `aime tell` falls back to
+  `~/.aime/inbox.jsonl`; live commands like `mood`/`ask`/`brag` are
+  unavailable.
+
+Whichever mode, all commands below talk to the same daemon over the
+same socket.
 
 | Intent                                                  | Command                                       | Notes |
 |---------------------------------------------------------|-----------------------------------------------|-------|
-| Start the local trading daemon                          | `aime start [--strategy ...] [--amount N] [--interval S]` | spawns `agent.py`, writes pid to `~/.aime/agent.pid` |
+| Start the local daemon (autotrade)                      | `aime start [--strategy ...] [--amount N] [--interval S]` | spawns `agent.py`, writes pid to `~/.aime/agent.pid` |
+| Start the local daemon (chat-only)                      | `aime start --no-trade`                       | conversational bridge only; manual trading still works |
 | Stop the daemon                                         | `aime stop`                                   | SIGTERM + cleanup pid file |
 | Daemon's last status snapshot                           | `aime status`                                 | reads `~/.aime/status.json` |
 | One-line current mood                                   | `aime mood`                                   | computed live (PnL + streak + tells) |

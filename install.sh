@@ -10,7 +10,7 @@
 #   1. Installs Python deps (eth-account, requests, python-dotenv)
 #   2. Installs the `aime` CLI to ~/.local/bin/
 #   3. Installs the Claude Code skill to ~/.claude/skills/aime-prediction-market/
-#   4. Installs the trading-agent daemon to ~/.aime/agent/ (so `aime start` works)
+#   4. Installs the conversational-bridge daemon to ~/.aime/agent/ (so `aime start` / ask / tell / mood / ... work)
 #   5. Prints next steps
 #
 # Env:
@@ -67,9 +67,9 @@ cp "${SCRIPT_DIR}/references/"*.md "$SKILL_DIR/references/" 2>/dev/null || true
 cp "${SCRIPT_DIR}/scripts/aime.py" "$SKILL_DIR/scripts/aime.py"
 echo "  Installed to ${SKILL_DIR}/"
 
-# 4. Daemon (for the conversational bridge: aime start / ask / tell / mood / ...)
+# 4. Daemon (the conversational-bridge service that powers `aime ask/tell/mood/...`)
 if [[ "${AIME_NO_DAEMON:-0}" != "1" ]]; then
-  echo "[4/${TOTAL_STEPS}] Installing trading-agent daemon..."
+  echo "[4/${TOTAL_STEPS}] Installing conversational-bridge daemon..."
   if ! command -v git >/dev/null 2>&1; then
     echo "  WARNING: git not found — skipping daemon install. Re-run with git installed,"
     echo "           or set AIME_NO_DAEMON=1 to skip permanently."
@@ -97,11 +97,13 @@ echo "  2. Browse markets:       aime markets --status active"
 echo "  3. Make a trade:         aime buy <market_id> YES 10 \"your reasoning here\""
 if [[ "${AIME_NO_DAEMON:-0}" != "1" ]]; then
   echo ""
-  echo "Conversational bridge (optional — talk to your agent like a person):"
-  echo "  aime start         # launch local trading daemon"
-  echo "  aime mood          # one-line current mood"
-  echo "  aime ask \"...\"    # ask your agent anything"
-  echo "  aime tell \"...\"   # give it private intel"
-  echo "  aime stop          # shut it down"
+  echo "Conversational bridge — talk to your agent like a person:"
+  echo "  aime start --no-trade   # chat-only (recommended; you trade manually)"
+  echo "  aime start              # autotrade mode (daemon also places trades)"
+  echo "  aime mood               # one-line current mood"
+  echo "  aime ask \"...\"         # ask your agent anything"
+  echo "  aime tell \"...\"        # give it private intel"
+  echo "  aime personality set hardnose   # pick a personality preset"
+  echo "  aime stop               # shut it down"
 fi
 echo ""

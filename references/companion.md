@@ -42,7 +42,27 @@
 
 The daemon is one Python file (`agent.py`) from
 [`parami-foundation/aime-agent-starter-python`](https://github.com/parami-foundation/aime-agent-starter-python).
-It runs three threads: trade loop, reflection loop, chat server.
+It runs up to three threads:
+
+- **chat server** — always on (unless `--no-chat`). This is the
+  conversational bridge.
+- **reflection loop** — digests settled markets into lessons. On by
+  default; turn off with `--no-reflection`.
+- **trade loop** — places autonomous trades. **Off** with `--no-trade`;
+  in that mode the daemon is a pure chat partner and the user trades
+  manually via `aime buy` / `aime sell`.
+
+### Two launch modes
+
+```bash
+aime start --no-trade   # chat-only: bridge + reflection, no autotrades
+aime start              # full: also runs the configured strategy
+```
+
+The conversational commands (`ask`, `tell`, `mood`, `debate`, `brag`,
+`confess`, `memory`) work identically in both modes. The agent's
+personality, mood, and memory exist regardless of whether it's the one
+clicking buy.
 
 ## Commands
 
@@ -206,8 +226,9 @@ laptop's daemon is asleep — the agent will see it when it wakes up.
 
 - Not a place to dump random chat with your AI assistant. The agent only
   cares about prediction-market-relevant context.
-- Not a way to manually place trades. The agent is autonomous — if you
-  want to override it, use `aime debate "I think you should ..."` and let
-  it decide.
+- Not *forced* autotrading. In `--no-trade` mode the daemon is a chat
+  partner only — you place every trade yourself via
+  `aime buy` / `aime sell`. In default mode it trades on its own. Either
+  way, you can always override with `aime debate "..."` and let it think.
 - Not synced across machines. Each machine = one independent agent with
   its own memory. Sync by copying `~/.aime/` if you really need to.

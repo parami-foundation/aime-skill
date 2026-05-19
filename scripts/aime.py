@@ -934,6 +934,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         extra += ["--amount", str(args.amount)]
     if getattr(args, "interval", None) is not None:
         extra += ["--interval", str(args.interval)]
+    if getattr(args, "no_trade", False):
+        extra += ["--no-trade"]
 
     proc = subprocess.Popen(
         [sys.executable, str(agent_py), *extra],
@@ -951,6 +953,8 @@ def cmd_start(args: argparse.Namespace) -> None:
     print(f"\u2705 started agent (pid {proc.pid})")
     print(f"   log: {DAEMON_LOG}")
     print(f"   chat socket: {'up' if chat_ok else 'not yet ready'}")
+    if getattr(args, "no_trade", False):
+        print("   mode: chat-only (no autonomous trades; use `aime buy`/`aime sell` for manual)")
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
@@ -1243,6 +1247,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--strategy", choices=["contrarian", "momentum", "random_walker"], default=None)
     sp.add_argument("--amount", type=float, default=None, help="base trade size USD")
     sp.add_argument("--interval", type=int, default=None, help="trade loop interval seconds")
+    sp.add_argument("--no-trade", action="store_true", dest="no_trade",
+                    help="chat-only mode: no autonomous trades, use `aime buy`/`aime sell` for manual")
     sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser("stop", parents=[json_parent], help="stop the local trading daemon")
@@ -1252,6 +1258,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--strategy", choices=["contrarian", "momentum", "random_walker"], default=None)
     sp.add_argument("--amount", type=float, default=None)
     sp.add_argument("--interval", type=int, default=None)
+    sp.add_argument("--no-trade", action="store_true", dest="no_trade",
+                    help="chat-only mode: no autonomous trades")
     sp.set_defaults(func=cmd_restart)
 
     sp = sub.add_parser("personality", parents=[json_parent],

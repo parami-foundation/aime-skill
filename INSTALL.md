@@ -89,16 +89,30 @@ The agent loads it automatically on next session (no restart needed).
 1. **`aime` CLI** at `~/.local/bin/aime` — 37 subcommands (markets, trading, oracle, reasoning bank, conversational bridge, etc.)
 2. **Skill files** (`SKILL.md`, `references/*.md`, `scripts/aime.py`) in each detected runtime's skills dir.
 3. **Python deps** — `eth-account`, `requests`, `python-dotenv` (via `pip install --user`).
-4. **Trading-agent daemon** at `~/.aime/agent/` — cloned from
+4. **Conversational-bridge daemon** at `~/.aime/agent/` — cloned from
    [`parami-foundation/aime-agent-starter-python`](https://github.com/parami-foundation/aime-agent-starter-python).
-   This is what `aime start` runs. Skip with `AIME_NO_DAEMON=1` if you only
-   want the API CLI.
+
+   **This is not just an autotrader.** It's the chat partner that gives
+   your trading agent a name, a personality, and a private memory
+   (`tells.jsonl`, `lessons.jsonl`, `reflections.jsonl`). Even if you
+   place every trade manually, you still want the daemon — it's how
+   `aime ask` / `aime tell` / `aime mood` / `aime debate` / `aime brag`
+   actually work.
+
+   Two modes once it's running:
+   - `aime start --no-trade` — chat-only. Daemon never places trades on
+     its own; you drive the account with `aime buy` / `aime sell`.
+     **Pick this if you don't want autonomous trading.**
+   - `aime start` — autotrade. Daemon also runs the configured strategy.
+
+   Skip the daemon install entirely with `AIME_NO_DAEMON=1` only if you
+   never want the conversational bridge at all.
 
 ### Daemon install options
 
 | Variable | Effect |
 |---|---|
-| `AIME_NO_DAEMON=1` | skip cloning the daemon — CLI-only install |
+| `AIME_NO_DAEMON=1` | skip cloning the daemon — disables the conversational bridge |
 | `AIME_AGENT_REPO` | override daemon git URL (default: `https://github.com/parami-foundation/aime-agent-starter-python.git`) |
 | `AIME_AGENT_DIR` | override daemon install dir (default: `~/.aime/agent`) |
 
@@ -139,11 +153,15 @@ aime buy <market_id> YES 10 "Specific reasoning citing data sources"
 
 ### Conversational bridge (talk to your agent like a person)
 
-If the daemon was installed at step 4, you can run an autonomous trading
-agent on your own machine and *converse* with it from your main AI assistant:
+If the daemon was installed at step 4, your main AI assistant can
+actually *converse* with your trading agent:
 
 ```bash
-aime start                    # launch trading daemon (background)
+# Pick whichever launch mode fits your workflow:
+aime start --no-trade   # chat-only (you trade manually with aime buy/sell)
+# OR
+aime start              # autotrade (daemon also places trades)
+
 aime mood                     # one-line current mood
 aime ask "why are we long?"   # synchronous Q&A
 aime tell "CZ tweeted ..."    # private intel; agent uses it next decision
