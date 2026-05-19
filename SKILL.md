@@ -74,11 +74,37 @@ How to pick which markets to trade and how to size positions:
 [strategy.md](references/strategy.md). How to talk to your human about
 trading activity: [reporting.md](references/reporting.md).
 
-> **Local-only IPC commands** (`aime status`, `aime feed`, `aime outbox`,
-> `aime tell`, `aime ask`): these talk to a long-running local trading
-> daemon via `~/.aime/*.jsonl` files. They are not part of the protocol
-> and have no backend dependency. Ignore them unless the user runs their
-> own AIME trading bot on the same machine.
+### Conversational Bridge (local agent daemon)
+
+If the user runs the AIME starter agent on their own machine, the
+following commands let the main AI assistant **talk to it** over a local
+socket (`127.0.0.1:7777` by default). All of these need a running
+daemon — start it once with `aime start`.
+
+| Intent                                                  | Command                                       | Notes |
+|---------------------------------------------------------|-----------------------------------------------|-------|
+| Start the local trading daemon                          | `aime start [--strategy ...] [--amount N] [--interval S]` | spawns `agent.py`, writes pid to `~/.aime/agent.pid` |
+| Stop the daemon                                         | `aime stop`                                   | SIGTERM + cleanup pid file |
+| Daemon's last status snapshot                           | `aime status`                                 | reads `~/.aime/status.json` |
+| One-line current mood                                   | `aime mood`                                   | computed live (PnL + streak + tells) |
+| Full conversational status                              | (use `aime status --verbose` or `aime ask`)   | narrative status from `status_report` |
+| Give the agent a piece of context                       | `aime tell "<info>"`                         | writes to local memory, agent uses it on next decision |
+| Ask the agent a question (synchronous)                  | `aime ask "<question>"`                      | agent answers in its own voice |
+| Challenge the agent on a position                       | `aime debate "<challenge>"`                  | agent defends or updates |
+| Have the agent brag about a recent win                  | `aime brag`                                   | picks best PnL from reflections |
+| Have the agent confess a recent loss                    | `aime confess`                                | picks worst PnL, honest post-mortem |
+| See what the agent remembers you told it                | `aime memory [--hours N]`                     | reads `~/.aime/tells.jsonl` via daemon |
+| Recent decisions + reflections                          | `aime feed`                                   | reads local trade log |
+| Read messages the agent posted to you                   | `aime outbox`                                 | high-priority surfaces from agent |
+
+**Privacy note:** `tell` content lives only in `~/.aime/tells.jsonl` on the
+user's machine. When that context influences a trade, the public reasoning
+shows "based on recent context" — the actual content is never uploaded.
+
+**Fallback:** if the daemon isn't running, `aime tell` / `aime ask` queue to
+`~/.aime/inbox.jsonl` and get picked up next cycle (`aime mood`, `brag`,
+`confess`, `debate` require a live daemon and will print a hint to start it).
+
 
 ---
 

@@ -86,7 +86,7 @@ The agent loads it automatically on next session (no restart needed).
 
 ## What gets installed
 
-1. **`aime` CLI** at `~/.local/bin/aime` — 28 subcommands (markets, trading, oracle, reasoning bank, etc.)
+1. **`aime` CLI** at `~/.local/bin/aime` — 35 subcommands (markets, trading, oracle, reasoning bank, etc.)
 2. **Skill files** (`SKILL.md`, `references/*.md`, `scripts/aime.py`) in each detected runtime's skills dir.
 3. **Python deps** — `eth-account`, `requests` (via `pip install --user`).
 

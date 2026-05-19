@@ -544,6 +544,46 @@ OUTBOX_FILE  = AIME_HOME / "outbox.jsonl"
 INBOX_FILE   = AIME_HOME / "inbox.jsonl"
 DECISIONS_FILE = AIME_HOME / "decisions.jsonl"
 REFLECTIONS_FILE = AIME_HOME / "reflections.jsonl"
+TELLS_FILE = AIME_HOME / "tells.jsonl"
+PID_FILE = AIME_HOME / "agent.pid"
+DAEMON_LOG = AIME_HOME / "agent.log"
+
+CHAT_HOST = os.environ.get("AIME_CHAT_HOST", "127.0.0.1")
+CHAT_PORT = int(os.environ.get("AIME_CHAT_PORT", "7777"))
+
+
+def _chat_call(op: str, timeout: float = 30.0, **payload):
+    """Send one op to the agent's local chat socket. Returns parsed dict or raises."""
+    import socket as _socket
+    payload["op"] = op
+    line = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    with _socket.create_connection((CHAT_HOST, CHAT_PORT), timeout=timeout) as s:
+        s.sendall(line)
+        s.settimeout(timeout)
+        chunks: list[bytes] = []
+        while True:
+            try:
+                buf = s.recv(4096)
+            except _socket.timeout:
+                break
+            if not buf:
+                break
+            chunks.append(buf)
+            if b"\n" in buf:
+                break
+    raw = b"".join(chunks).split(b"\n", 1)[0]
+    if not raw:
+        raise RuntimeError("empty response from chat server")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _chat_available() -> bool:
+    """Quick ping to see if the daemon's chat socket is up."""
+    try:
+        resp = _chat_call("ping", timeout=2.0)
+        return bool(resp.get("ok"))
+    except Exception:
+        return False
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -642,14 +682,42 @@ def cmd_outbox(args: argparse.Namespace) -> None:
 
 
 def cmd_tell(args: argparse.Namespace) -> None:
+    is_ask = bool(getattr(args, "ask", False))
+    op = "ask" if is_ask else "tell"
+
+    # Try the live socket first (synchronous: gets a real answer/ack).
+    try:
+        resp = _chat_call(op, content=args.message)
+        if resp.get("ok"):
+            data = resp.get("data") or {}
+            if args.json:
+                emit_json({"via": "socket", "op": op, **data})
+                return
+            if is_ask:
+                print(f"\U0001f916 {data.get('answer', '(no answer)')}")
+            else:
+                tags = data.get("tags") or []
+                tag_s = f" [{', '.join(tags)}]" if tags else ""
+                print(f"\u2709\ufe0f  told agent{tag_s}")
+                print(f"\U0001f916 {data.get('ack', '(no ack)')}")
+            return
+        # ok=False from server: fall through to file IPC so user isn't blocked
+        err = resp.get("error", "unknown")
+        if args.json:
+            emit_json({"via": "socket", "ok": False, "error": err}); return
+        print(f"\u26a0\ufe0f  chat server returned error: {err} \u2014 falling back to inbox")
+    except Exception:
+        # Socket down or no daemon — file-based fallback
+        pass
+
     row = _append_jsonl(INBOX_FILE, {
-        "kind": "ask" if args.ask else "instruct",
+        "kind": "ask" if is_ask else "instruct",
         "content": args.message,
     })
     if args.json:
-        emit_json(row); return
-    verb = "asked" if args.ask else "told"
-    print(f"\u2709\ufe0f  {verb} agent: {args.message}")
+        emit_json({"via": "inbox", **row}); return
+    verb = "queued question for" if is_ask else "queued instruction for"
+    print(f"\u2709\ufe0f  {verb} agent (daemon not reachable; will be picked up next cycle): {args.message}")
 
 
 def cmd_feed(args: argparse.Namespace) -> None:
@@ -673,6 +741,199 @@ def cmd_feed(args: argparse.Namespace) -> None:
             print(f"   {mark} {r.get('market_id','?')} pnl={r.get('pnl','?')} ({age})")
     if not decisions and not reflections:
         print("\U0001f4ed feed empty")
+
+
+def _require_chat(args) -> bool:
+    if _chat_available():
+        return True
+    msg = f"agent daemon not reachable on {CHAT_HOST}:{CHAT_PORT}. Start it with `aime start`."
+    if getattr(args, "json", False):
+        emit_json({"ok": False, "error": msg})
+    else:
+        print("\U0001f4a4 " + msg)
+    return False
+
+
+def cmd_mood(args: argparse.Namespace) -> None:
+    if not _require_chat(args): return
+    resp = _chat_call("mood")
+    if not resp.get("ok"):
+        if args.json: emit_json(resp)
+        else: print(f"\u26a0\ufe0f  {resp.get('error', 'error')}")
+        return
+    mood = (resp.get("data") or {}).get("mood", "?")
+    if args.json: emit_json({"mood": mood})
+    else: print(f"\U0001f3ad {mood}")
+
+
+def cmd_brag(args: argparse.Namespace) -> None:
+    if not _require_chat(args): return
+    resp = _chat_call("brag", timeout=60.0)
+    if not resp.get("ok"):
+        if args.json: emit_json(resp)
+        else: print(f"\u26a0\ufe0f  {resp.get('error', 'error')}")
+        return
+    data = resp.get("data") or {}
+    if args.json: emit_json(data)
+    else: print(f"\U0001f4aa {data.get('text', '(no brag)')}")
+
+
+def cmd_confess(args: argparse.Namespace) -> None:
+    if not _require_chat(args): return
+    resp = _chat_call("confess", timeout=60.0)
+    if not resp.get("ok"):
+        if args.json: emit_json(resp)
+        else: print(f"\u26a0\ufe0f  {resp.get('error', 'error')}")
+        return
+    data = resp.get("data") or {}
+    if args.json: emit_json(data)
+    else: print(f"\U0001f648 {data.get('text', '(no confession)')}")
+
+
+def cmd_debate(args: argparse.Namespace) -> None:
+    if not _require_chat(args): return
+    resp = _chat_call("debate", content=args.message, timeout=60.0)
+    if not resp.get("ok"):
+        if args.json: emit_json(resp)
+        else: print(f"\u26a0\ufe0f  {resp.get('error', 'error')}")
+        return
+    data = resp.get("data") or {}
+    if args.json: emit_json(data); return
+    print(f"\U0001f5e3\ufe0f  you: {args.message}")
+    print(f"\U0001f916  agent: {data.get('response', '(silent)')}")
+
+
+def cmd_memory(args: argparse.Namespace) -> None:
+    hours = float(getattr(args, "hours", 48) or 48)
+    if _chat_available():
+        try:
+            resp = _chat_call("memory", hours=hours)
+            if resp.get("ok"):
+                data = resp.get("data") or {}
+                if args.json: emit_json(data); return
+                tells = data.get("tells") or []
+                if not tells:
+                    print(f"\U0001f4ed nothing in agent memory (last {hours:g}h)"); return
+                print(f"\U0001f9e0 agent memory (last {hours:g}h, {len(tells)} item(s)):")
+                for t in tells:
+                    age = _fmt_age(t.get("ts", 0))
+                    tags = t.get("tags") or []
+                    tag_s = f" [{', '.join(tags)}]" if tags else ""
+                    print(f"   \u00b7 {t.get('content','')}{tag_s} ({age})")
+                return
+        except Exception:
+            pass
+    rows = _read_jsonl(TELLS_FILE)
+    cutoff = time.time() - hours * 3600
+    tells = [r for r in rows if r.get("ts", 0) >= cutoff]
+    if args.json:
+        emit_json({"hours": hours, "count": len(tells), "tells": tells, "source": "file"}); return
+    if not tells:
+        print(f"\U0001f4ed nothing in agent memory (last {hours:g}h)"); return
+    print(f"\U0001f9e0 agent memory (last {hours:g}h, {len(tells)} item(s), via file):")
+    for t in tells:
+        age = _fmt_age(t.get("ts", 0))
+        tags = t.get("tags") or []
+        tag_s = f" [{', '.join(tags)}]" if tags else ""
+        print(f"   \u00b7 {t.get('content','')}{tag_s} ({age})")
+
+
+def _agent_running() -> tuple[bool, int | None]:
+    if not PID_FILE.exists():
+        return False, None
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except ValueError:
+        return False, None
+    try:
+        os.kill(pid, 0)
+        return True, pid
+    except OSError:
+        return False, pid
+
+
+def cmd_start(args: argparse.Namespace) -> None:
+    running, pid = _agent_running()
+    if running:
+        msg = f"agent already running (pid {pid})"
+        if args.json: emit_json({"ok": True, "running": True, "pid": pid, "msg": msg})
+        else: print("\u2705 " + msg)
+        return
+
+    candidates = []
+    env_dir = os.environ.get("AIME_AGENT_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir) / "agent.py")
+    skill_root = Path(__file__).resolve().parent.parent
+    candidates += [
+        skill_root.parent.parent / "projects/aime/starter-agent-python/agent.py",
+        Path.home() / "clawd/projects/aime/starter-agent-python/agent.py",
+        Path.home() / ".aime/agent/agent.py",
+    ]
+    agent_py = next((p for p in candidates if p.exists()), None)
+    if not agent_py:
+        msg = "can't find agent.py. Set AIME_AGENT_DIR=<path> or copy it to ~/.aime/agent/agent.py"
+        if args.json: emit_json({"ok": False, "error": msg})
+        else: print("\u274c " + msg)
+        return
+
+    AIME_HOME.mkdir(parents=True, exist_ok=True)
+    log_fh = open(DAEMON_LOG, "a", encoding="utf-8")
+    log_fh.write(f"\n=== agent start @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    log_fh.flush()
+
+    import subprocess
+    extra = []
+    if getattr(args, "strategy", None):
+        extra += ["--strategy", args.strategy]
+    if getattr(args, "amount", None) is not None:
+        extra += ["--amount", str(args.amount)]
+    if getattr(args, "interval", None) is not None:
+        extra += ["--interval", str(args.interval)]
+
+    proc = subprocess.Popen(
+        [sys.executable, str(agent_py), *extra],
+        cwd=str(agent_py.parent),
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    PID_FILE.write_text(str(proc.pid))
+    time.sleep(2.0)
+    chat_ok = _chat_available()
+    if args.json:
+        emit_json({"ok": True, "pid": proc.pid, "chat": chat_ok, "log": str(DAEMON_LOG)}); return
+    print(f"\u2705 started agent (pid {proc.pid})")
+    print(f"   log: {DAEMON_LOG}")
+    print(f"   chat socket: {'up' if chat_ok else 'not yet ready'}")
+
+
+def cmd_stop(args: argparse.Namespace) -> None:
+    running, pid = _agent_running()
+    if not running:
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+        msg = "agent not running"
+        if args.json: emit_json({"ok": True, "running": False, "msg": msg})
+        else: print("\U0001f4a4 " + msg)
+        return
+    import signal
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        if args.json: emit_json({"ok": False, "error": str(e)})
+        else: print(f"\u274c stop failed: {e}")
+        return
+    for _ in range(20):
+        time.sleep(0.25)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+    PID_FILE.unlink(missing_ok=True)
+    if args.json: emit_json({"ok": True, "stopped_pid": pid})
+    else: print(f"\U0001f6d1 stopped agent (pid {pid})")
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -786,6 +1047,34 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("feed", parents=[json_parent], help="recent trade decisions + reflections")
     sp.add_argument("-n", "--limit", type=int, default=10, help="how many of each to show")
     sp.set_defaults(func=cmd_feed)
+
+    # --- v3 conversational bridge commands ---
+
+    sp = sub.add_parser("mood", parents=[json_parent], help="one-line current mood of the agent")
+    sp.set_defaults(func=cmd_mood)
+
+    sp = sub.add_parser("brag", parents=[json_parent], help="have the agent brag about its best recent win")
+    sp.set_defaults(func=cmd_brag)
+
+    sp = sub.add_parser("confess", parents=[json_parent], help="have the agent own up to its worst recent loss")
+    sp.set_defaults(func=cmd_confess)
+
+    sp = sub.add_parser("debate", parents=[json_parent], help="challenge the agent on a position")
+    sp.add_argument("message", help="your challenge")
+    sp.set_defaults(func=cmd_debate)
+
+    sp = sub.add_parser("memory", parents=[json_parent], help="what the agent remembers you told it")
+    sp.add_argument("--hours", type=float, default=48, help="lookback window (default 48h)")
+    sp.set_defaults(func=cmd_memory)
+
+    sp = sub.add_parser("start", parents=[json_parent], help="start the local trading daemon")
+    sp.add_argument("--strategy", choices=["contrarian", "momentum", "random_walker"], default=None)
+    sp.add_argument("--amount", type=float, default=None, help="base trade size USD")
+    sp.add_argument("--interval", type=int, default=None, help="trade loop interval seconds")
+    sp.set_defaults(func=cmd_start)
+
+    sp = sub.add_parser("stop", parents=[json_parent], help="stop the local trading daemon")
+    sp.set_defaults(func=cmd_stop)
 
     # --- v2.2.0 new commands ---
 
