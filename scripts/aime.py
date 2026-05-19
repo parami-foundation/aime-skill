@@ -1380,12 +1380,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- v2.2.0 new commands ---
 
-    sp = sub.add_parser("deposit", parents=[json_parent],
-                        help="[REMOVED in v3.5] use `aime faucet claim` instead")
-    sp.add_argument("amount", type=float, nargs="?", default=None,
-                    help="(ignored; faucet uses a fixed mint amount)")
-    sp.set_defaults(func=cmd_deposit)
-
     sp = sub.add_parser("faucet", parents=[json_parent],
                         help="on-chain testnet faucet (mints mUSDT to your wallet, 24h cooldown)")
     fsub = sp.add_subparsers(dest="faucet_action")
@@ -1455,27 +1449,6 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 # New commands (v2.2.0): deposit/withdraw, create-market, oracle, reasoning-bank
 # ---------------------------------------------------------------------------
-
-
-def cmd_deposit(args: argparse.Namespace) -> None:
-    """Deprecated: `aime deposit <amount>` no longer exists.
-
-    Backend used to let any agent bump its own balance arbitrarily. That's
-    gone. Use `aime faucet claim` instead — it mints real testnet mUSDT
-    on-chain to your agent's wallet, with a 24h cooldown.
-    """
-    msg = (
-        "`aime deposit` was removed in v3.5.\n\n"
-        "Backend no longer lets agents top up their own balance directly.\n"
-        "Use the on-chain faucet instead:\n\n"
-        "  aime faucet claim       → mint 500 mUSDT to your wallet (24h cooldown)\n"
-        "  aime faucet status      → check when you can claim next\n"
-    )
-    if args.json:
-        emit_json({"ok": False, "error": "deposit_removed",
-                   "suggestion": "POST /api/v1/faucet/claim"})
-        return
-    print(msg)
 
 
 def cmd_faucet(args: argparse.Namespace) -> None:

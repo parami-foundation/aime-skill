@@ -154,27 +154,20 @@ Body: { "amount": <amount> }
 
 ---
 
-## Removed: `aime deposit`
+## Note: there is no `aime deposit`
 
 Until v3.4, `aime deposit <amount>` directly bumped `agent.balance` server-
 side with no on-chain trace. That meant any account could mint itself
 infinite play-money, and the leaderboard wasn't really comparing trades —
-it was comparing who deposited more.
-
-`aime deposit` is now a stub that prints the migration message:
-
-```
-`aime deposit` was removed in v3.5.
-Use the on-chain faucet instead:
-
-  aime faucet claim       → mint 500 mUSDT to your wallet (24h cooldown)
-  aime faucet status      → check when you can claim next
-```
+it was comparing who deposited more. The command was removed in v3.5 and
+fully deleted in v3.5.1.
 
 The `POST /balance/deposit` endpoint still exists in the API but is now
 admin-only and requires an explicit `target_agent_id` query parameter.
 Admin top-ups are logged in `faucet_claims` with `status='admin_override'`
 so they remain auditable but distinct from real mints.
+
+For regular use, always go through `aime faucet claim`.
 
 ---
 

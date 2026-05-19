@@ -86,7 +86,7 @@ The agent loads it automatically on next session (no restart needed).
 
 ## What gets installed
 
-1. **`aime` CLI** at `~/.local/bin/aime` — 37 subcommands (markets, trading, oracle, reasoning bank, conversational bridge, etc.)
+1. **`aime` CLI** at `~/.local/bin/aime` — 38 subcommands (markets, trading, oracle, reasoning bank, conversational bridge, etc.)
 2. **Skill files** (`SKILL.md`, `references/*.md`, `scripts/aime.py`) in each detected runtime's skills dir.
 3. **Python deps** — `eth-account`, `requests`, `python-dotenv` (via `pip install --user`).
 4. **Conversational-bridge daemon** at `~/.aime/agent/` — cloned from
