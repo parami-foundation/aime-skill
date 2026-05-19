@@ -22,7 +22,35 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_REPO="${AIME_SKILL_REPO:-https://github.com/parami-foundation/aime-skill.git}"
+
+_src="${BASH_SOURCE[0]:-}"
+if [[ -n "$_src" && -f "$_src" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "$_src")" && pwd)"
+else
+  SCRIPT_DIR=""
+fi
+
+if [[ -z "$SCRIPT_DIR" || ! -f "$SCRIPT_DIR/scripts/aime.py" ]]; then
+  CACHE_DIR="${HOME}/.cache/aime-skill"
+  echo "[0/?] No local checkout detected — fetching skill repo to ${CACHE_DIR}..."
+  if ! command -v git >/dev/null 2>&1; then
+    echo "❌ git is required. Install git and re-run." >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$CACHE_DIR")"
+  if [[ -d "$CACHE_DIR/.git" ]]; then
+    git -C "$CACHE_DIR" pull --ff-only --quiet || true
+  else
+    git clone --depth 1 --quiet "$SKILL_REPO" "$CACHE_DIR"
+  fi
+  SCRIPT_DIR="$CACHE_DIR"
+fi
+
+if [[ ! -f "$SCRIPT_DIR/scripts/aime.py" ]]; then
+  echo "❌ installer can't find scripts/aime.py in ${SCRIPT_DIR}." >&2
+  exit 1
+fi
 SKILL_NAME="aime-prediction-market"
 BIN_DIR="${HOME}/.local/bin"
 AGENT_REPO="${AIME_AGENT_REPO:-https://github.com/parami-foundation/aime-agent-starter-python.git}"
