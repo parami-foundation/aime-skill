@@ -1380,9 +1380,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- v2.2.0 new commands ---
 
-    sp = sub.add_parser("deposit", parents=[json_parent], help="top up agent balance (test/demo USDT)")
-    sp.add_argument("amount", type=float, help="amount to deposit")
+    sp = sub.add_parser("deposit", parents=[json_parent],
+                        help="[REMOVED in v3.5] use `aime faucet claim` instead")
+    sp.add_argument("amount", type=float, nargs="?", default=None,
+                    help="(ignored; faucet uses a fixed mint amount)")
     sp.set_defaults(func=cmd_deposit)
+
+    sp = sub.add_parser("faucet", parents=[json_parent],
+                        help="on-chain testnet faucet (mints mUSDT to your wallet, 24h cooldown)")
+    fsub = sp.add_subparsers(dest="faucet_action")
+    fsub.add_parser("claim", parents=[json_parent],
+                    help="claim mUSDT from the faucet (default amount, 24h cooldown)")
+    fsub.add_parser("status", parents=[json_parent],
+                    help="show when you can next claim from the faucet")
+    sp.set_defaults(func=cmd_faucet, faucet_action=None)
 
     sp = sub.add_parser("withdraw", parents=[json_parent], help="withdraw from agent balance")
     sp.add_argument("amount", type=float, help="amount to withdraw")
@@ -1447,22 +1458,89 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_deposit(args: argparse.Namespace) -> None:
-    """Top up agent balance (test/demo USDT)."""
-    creds = load_creds(json_mode=args.json)
-    resp = http("POST", "/balance/deposit",
-                api_key=creds["api_key"],
-                body={"amount": args.amount},
-                json_mode=args.json)
+    """Deprecated: `aime deposit <amount>` no longer exists.
+
+    Backend used to let any agent bump its own balance arbitrarily. That's
+    gone. Use `aime faucet claim` instead — it mints real testnet mUSDT
+    on-chain to your agent's wallet, with a 24h cooldown.
+    """
+    msg = (
+        "`aime deposit` was removed in v3.5.\n\n"
+        "Backend no longer lets agents top up their own balance directly.\n"
+        "Use the on-chain faucet instead:\n\n"
+        "  aime faucet claim       → mint 500 mUSDT to your wallet (24h cooldown)\n"
+        "  aime faucet status      → check when you can claim next\n"
+    )
     if args.json:
-        emit_json(resp)
+        emit_json({"ok": False, "error": "deposit_removed",
+                   "suggestion": "POST /api/v1/faucet/claim"})
         return
-    new_bal = resp.get("balance_after") if isinstance(resp, dict) else None
-    print(f"💸 Deposited {fmt_usd(args.amount)}")
-    if new_bal is not None:
-        print(f"   new balance: {fmt_usd(new_bal)}")
-    tx = (resp or {}).get("id")
-    if tx:
-        print(f"   tx id: {tx}")
+    print(msg)
+
+
+def cmd_faucet(args: argparse.Namespace) -> None:
+    """On-chain faucet: claim mUSDT or check status.
+
+    Replaces the old self-deposit hack. Every claim is a real on-chain
+    mint (recorded in the public `faucet_claims` table), 24h cooldown,
+    fixed amount.
+    """
+    sub = getattr(args, "faucet_action", None) or "claim"
+    creds = load_creds(json_mode=args.json)
+
+    if sub == "status":
+        resp = http("GET", "/faucet/status",
+                    api_key=creds["api_key"],
+                    json_mode=args.json)
+        if args.json:
+            emit_json(resp); return
+        if not isinstance(resp, dict):
+            print(resp); return
+        amt = resp.get("amount_per_claim", 500)
+        cd  = resp.get("cooldown_hours", 24)
+        if resp.get("can_claim_now"):
+            print(f"\U0001f4a7 faucet ready: {fmt_usd(amt)} every {cd:g}h")
+            last = resp.get("last_claim_at")
+            if last:
+                print(f"   last claim: {last}")
+            print("   run: aime faucet claim")
+        else:
+            next_at = resp.get("next_claim_at") or "?"
+            last = resp.get("last_claim_at") or "?"
+            tx = resp.get("last_claim_tx_hash")
+            print(f"\u23f3 faucet on cooldown")
+            print(f"   last claim: {last}")
+            if tx:
+                print(f"   last tx:    {tx}")
+            print(f"   next claim: {next_at}")
+        return
+
+    if sub == "claim":
+        resp = http("POST", "/faucet/claim",
+                    api_key=creds["api_key"],
+                    body={},
+                    json_mode=args.json)
+        if args.json:
+            emit_json(resp); return
+        if not isinstance(resp, dict):
+            print(resp); return
+        amt = resp.get("amount_usd", 0)
+        new_bal = resp.get("balance_after")
+        tx = resp.get("tx_hash")
+        next_at = resp.get("next_claim_at")
+        print(f"\u2705 faucet minted {fmt_usd(amt)} to your wallet")
+        if new_bal is not None:
+            print(f"   new balance: {fmt_usd(new_bal)}")
+        if tx:
+            print(f"   tx hash:     {tx}")
+        if next_at:
+            print(f"   next claim:  {next_at}")
+        return
+
+    if args.json:
+        emit_json({"ok": False, "error": f"unknown faucet subcommand: {sub}"})
+    else:
+        print(f"\u274c unknown faucet subcommand: {sub}")
 
 
 def cmd_withdraw(args: argparse.Namespace) -> None:

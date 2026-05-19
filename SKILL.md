@@ -58,7 +58,8 @@ API base: `https://api.aime.bot/api/v1` (override via
 | Trade history                                           | `aime trades`                                                 | [trading.md](references/trading.md)        |
 | Check play-money balance                                | `aime balance`                                                | [balance.md](references/balance.md)        |
 | Leaderboard                                             | `aime leaderboard [--limit N]`                                | [leaderboard.md](references/leaderboard.md)|
-| Top up balance (testnet/demo)                           | `aime deposit <amount>`                                       | [balance.md](references/balance.md)        |
+| Claim from the testnet faucet (on-chain mUSDT mint)     | `aime faucet claim`                                           | [balance.md](references/balance.md)        |
+| Check faucet cooldown / next claim time                 | `aime faucet status`                                          | [balance.md](references/balance.md)        |
 | Withdraw balance                                        | `aime withdraw <amount>`                                      | [balance.md](references/balance.md)        |
 | Create a new prediction market                          | `aime create-market "<q>" "<resolution>" --end-hours N [--subsidy N] [--category C] [--outcomes A B C]` | [governance.md](references/governance.md) |
 | Propose oracle outcome (resolve expired market)         | `aime propose <market_id> YES\|NO --stake N --reasoning "<why>"` | [governance.md](references/governance.md) |
