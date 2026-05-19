@@ -725,6 +725,53 @@ def cmd_outbox(args: argparse.Namespace) -> None:
             _rewrite_jsonl(OUTBOX_FILE, rows)
 
 
+ALERT_EVENT_TYPES = {
+    "balance_low", "drawdown", "chain_error_rate",
+    "losing_streak", "winning_streak", "profit_milestone",
+    "market_settled", "owner_intel_paid_off",
+    # legacy
+    "loss_streak",
+}
+
+ALERT_ICONS = {
+    "balance_low":        "\U0001f4b8",
+    "drawdown":           "\U0001f4c9",
+    "chain_error_rate":   "\u26a0\ufe0f",
+    "losing_streak":      "\U0001f635",
+    "loss_streak":        "\U0001f635",
+    "winning_streak":     "\U0001f525",
+    "profit_milestone":   "\U0001f389",
+    "market_settled":     "\U0001f3c1",
+    "owner_intel_paid_off": "\U0001f64f",
+}
+
+
+def cmd_alerts(args: argparse.Namespace) -> None:
+    """Show recent proactive alerts (a filtered view over outbox)."""
+    rows = _read_jsonl(OUTBOX_FILE)
+    # Filter to alert event types
+    alerts = [r for r in rows if r.get("msg_type") in ALERT_EVENT_TYPES]
+    if getattr(args, "event", None):
+        alerts = [r for r in alerts if r.get("msg_type") == args.event]
+    if getattr(args, "high_only", False):
+        alerts = [r for r in alerts if (r.get("priority") or "").lower() == "high"]
+    alerts = alerts[-args.limit:] if args.limit else alerts
+
+    if args.json:
+        emit_json(alerts); return
+
+    if not alerts:
+        print("\U0001f4ed no alerts yet — your agent has nothing alarming to report")
+        return
+
+    for a in alerts:
+        et = a.get("msg_type") or "?"
+        icon = ALERT_ICONS.get(et, "\U0001f4e3")
+        prio = (a.get("priority") or "info").upper()
+        age = _fmt_age(a.get("ts", 0))
+        print(f"{icon} [{prio}] {et}: {a.get('msg','')} — {age}")
+
+
 def cmd_tell(args: argparse.Namespace) -> None:
     is_ask = bool(getattr(args, "ask", False))
     op = "ask" if is_ask else "tell"
@@ -942,6 +989,14 @@ def cmd_start(args: argparse.Namespace) -> None:
         extra += ["--take-profit", str(args.take_profit)]
     if getattr(args, "no_position_management", False):
         extra += ["--no-position-management"]
+    if getattr(args, "no_alerts", False):
+        extra += ["--no-alerts"]
+    if getattr(args, "alerts_balance_low", None) is not None:
+        extra += ["--alerts-balance-low", str(args.alerts_balance_low)]
+    if getattr(args, "alerts_drawdown", None):
+        extra += ["--alerts-drawdown", args.alerts_drawdown]
+    if getattr(args, "alerts_profit", None):
+        extra += ["--alerts-profit", args.alerts_profit]
 
     proc = subprocess.Popen(
         [sys.executable, str(agent_py), *extra],
@@ -1243,6 +1298,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-n", "--limit", type=int, default=10, help="how many of each to show")
     sp.set_defaults(func=cmd_feed)
 
+    sp = sub.add_parser("alerts", parents=[json_parent],
+                        help="recent proactive alerts from your agent (filtered outbox view)")
+    sp.add_argument("-n", "--limit", type=int, default=20, help="how many to show (default 20)")
+    sp.add_argument("--event",
+                    choices=sorted(ALERT_EVENT_TYPES),
+                    help="only show alerts of this event type")
+    sp.add_argument("--high-only", dest="high_only", action="store_true",
+                    help="only show priority=high alerts")
+    sp.set_defaults(func=cmd_alerts)
+
     # --- v3 conversational bridge commands ---
 
     sp = sub.add_parser("mood", parents=[json_parent], help="one-line current mood of the agent")
@@ -1274,6 +1339,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="close any position whose value/cost rises to (1+take_profit). Default 1.0 (sell at 2x).")
     sp.add_argument("--no-position-management", action="store_true", dest="no_position_management",
                     help="disable the stop-loss / take-profit scan at the top of each cycle")
+    sp.add_argument("--no-alerts", action="store_true", dest="no_alerts",
+                    help="disable proactive event alerts (balance_low / drawdown / streaks / settled / etc)")
+    sp.add_argument("--alerts-balance-low", dest="alerts_balance_low", type=float, default=None,
+                    help="USD threshold for the balance_low alert (default 50)")
+    sp.add_argument("--alerts-drawdown", dest="alerts_drawdown", type=str, default=None,
+                    help="comma-sep fractions for drawdown alerts (default '0.2,0.5')")
+    sp.add_argument("--alerts-profit", dest="alerts_profit", type=str, default=None,
+                    help="comma-sep fractions for profit milestones (default '0.1,0.2,0.5')")
     sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser("stop", parents=[json_parent], help="stop the local trading daemon")
@@ -1288,6 +1361,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--stop-loss", dest="stop_loss", type=float, default=None)
     sp.add_argument("--take-profit", dest="take_profit", type=float, default=None)
     sp.add_argument("--no-position-management", action="store_true", dest="no_position_management")
+    sp.add_argument("--no-alerts", action="store_true", dest="no_alerts")
+    sp.add_argument("--alerts-balance-low", dest="alerts_balance_low", type=float, default=None)
+    sp.add_argument("--alerts-drawdown", dest="alerts_drawdown", type=str, default=None)
+    sp.add_argument("--alerts-profit", dest="alerts_profit", type=str, default=None)
     sp.set_defaults(func=cmd_restart)
 
     sp = sub.add_parser("personality", parents=[json_parent],

@@ -84,6 +84,47 @@ string (`stop-loss: value/cost=0.40 (threshold 0.50); pnl=$-6.00`),
 which is written to the public reasoning bank — so the agent's exit
 decisions are auditable on the leaderboard, not invisible.
 
+### Proactive alerts (the pet talks unprompted)
+
+The daemon doesn't wait for you to ask `aime status` — it speaks up when
+something matters. At the end of every trade cycle it runs eight built-in
+triggers; anything that fires is written to `outbox.jsonl` (with a
+personality-flavoured one-liner from the brain) and, if priority is
+`high` and `AIME_WEBHOOK_URL` is set, also POSTed to that webhook.
+
+| Trigger | Fires when | Priority | Dedup |
+|---|---|---|---|
+| `balance_low` | free balance < threshold (default $50) | high | 12h cooldown |
+| `drawdown` | account down ≥20%% / ≥50%% from peak | high | per-threshold, once each |
+| `chain_error_rate` | recent trade attempts >50%% failing | high | 1h cooldown |
+| `losing_streak` | 3 stop-losses in a row | info | 12h cooldown |
+| `winning_streak` | 3 wins in a row | info | 12h cooldown |
+| `profit_milestone` | account first hits +10%% / +20%% / +50%% from start | info | per-threshold, once each |
+| `market_settled` | a market you bet on just resolved (win or loss) | info | per market |
+| `owner_intel_paid_off` | a `tell`-influenced trade settled green | info | per market |
+
+Knobs:
+
+```bash
+aime start --alerts-balance-low 100              # change balance floor
+aime start --alerts-drawdown 0.1,0.3             # earlier drawdown alerts
+aime start --alerts-profit 0.25,0.5,1.0          # only louder milestones
+aime start --no-alerts                            # silence everything
+export AIME_WEBHOOK_URL=https://your.tg.bot/      # high-priority push
+```
+
+Quiet hours: 23:00–08:00 local time, only `high`-priority alerts go
+through. Outbox always gets every event.
+
+View them:
+
+```bash
+aime alerts                          # last 20 alerts
+aime alerts --event drawdown         # just one kind
+aime alerts --high-only              # only the loud ones
+aime alerts --json                   # machine-readable
+```
+
 The conversational commands (`ask`, `tell`, `mood`, `debate`, `brag`,
 `confess`, `memory`) work identically in both modes. The agent's
 personality, mood, and memory exist regardless of whether it's the one

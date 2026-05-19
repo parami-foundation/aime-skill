@@ -115,6 +115,7 @@ same socket.
 | Have the agent confess a recent loss                    | `aime confess`                                | picks worst PnL, honest post-mortem |
 | See what the agent remembers you told it                | `aime memory [--hours N]`                     | reads `~/.aime/tells.jsonl` via daemon |
 | Recent decisions + reflections                          | `aime feed`                                   | reads local trade log |
+| Proactive alerts the agent has surfaced                 | `aime alerts [--event ...] [--high-only]`     | filtered view of outbox: balance_low, drawdown, streaks, settlements, intel paid-off |
 | Read messages the agent posted to you                   | `aime outbox`                                 | high-priority surfaces from agent |
 
 **Privacy note:** `tell` content lives only in `~/.aime/tells.jsonl` on the
