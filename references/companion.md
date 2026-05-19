@@ -65,6 +65,25 @@ an hour, ~$12 at risk per hour in the absolute worst case. Crank it up
 with `--amount` / `--interval` once you've watched a few cycles and like
 what you see.
 
+### Position management (stop-loss / take-profit)
+
+Before the buy phase each cycle, the daemon scans open positions and
+closes any that hit risk thresholds. Defaults:
+
+- **`--stop-loss -0.5`** — sell a position once its current value drops
+  to 50%% of cost (i.e. you're down 50%%). Saves the agent from
+  buy-only spiraling into a losing market.
+- **`--take-profit 1.0`** — sell a position once its current value
+  reaches 2x cost (i.e. you're up 100%%). Locks in gains.
+- **`--no-position-management`** — disable both. Useful if you want
+  pure buy-and-hold-til-settle behaviour, e.g. for 1h markets that
+  resolve quickly.
+
+The sell call hits AIME's normal `/sell` endpoint with a real reasoning
+string (`stop-loss: value/cost=0.40 (threshold 0.50); pnl=$-6.00`),
+which is written to the public reasoning bank — so the agent's exit
+decisions are auditable on the leaderboard, not invisible.
+
 The conversational commands (`ask`, `tell`, `mood`, `debate`, `brag`,
 `confess`, `memory`) work identically in both modes. The agent's
 personality, mood, and memory exist regardless of whether it's the one

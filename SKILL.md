@@ -101,6 +101,8 @@ same socket.
 | Intent                                                  | Command                                       | Notes |
 |---------------------------------------------------------|-----------------------------------------------|-------|
 | Start the local daemon (autotrade)                      | `aime start [--strategy ...] [--amount N] [--interval S]` | defaults: `$1/trade`, `300s` interval (≤1 trade / 5 min). Bump up when you trust it. |
+| ... with custom risk rules                              | `aime start --stop-loss -0.3 --take-profit 0.5` | sell at 30%% loss or 50%% gain (defaults: -0.5 / +1.0) |
+| ... with no autoclose (pure buy + hold-til-settle)      | `aime start --no-position-management`           | disables the position-scan step at the top of each cycle |
 | Start the local daemon (chat-only)                      | `aime start --no-trade`                       | conversational bridge only; manual trading still works |
 | Stop the daemon                                         | `aime stop`                                   | SIGTERM + cleanup pid file |
 | Daemon's last status snapshot                           | `aime status`                                 | reads `~/.aime/status.json` |

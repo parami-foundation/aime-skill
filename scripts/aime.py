@@ -936,6 +936,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         extra += ["--interval", str(args.interval)]
     if getattr(args, "no_trade", False):
         extra += ["--no-trade"]
+    if getattr(args, "stop_loss", None) is not None:
+        extra += ["--stop-loss", str(args.stop_loss)]
+    if getattr(args, "take_profit", None) is not None:
+        extra += ["--take-profit", str(args.take_profit)]
+    if getattr(args, "no_position_management", False):
+        extra += ["--no-position-management"]
 
     proc = subprocess.Popen(
         [sys.executable, str(agent_py), *extra],
@@ -962,6 +968,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         ivl = args.interval if getattr(args, "interval", None) else 300
         max_per_hour = max(1, int(3600 / max(ivl, 1)))
         print(f"   trading: \u2264{max_per_hour}/hr at \u2264${amt:.2f}/trade (`--no-trade` for chat-only; `aime stop` to halt)")
+        if getattr(args, "no_position_management", False):
+            print("   position management: DISABLED")
+        else:
+            sl = args.stop_loss if getattr(args, "stop_loss", None) is not None else -0.5
+            tp = args.take_profit if getattr(args, "take_profit", None) is not None else 1.0
+            print(f"   stop-loss: value/cost \u2264 {1 + sl:.2f}   take-profit: value/cost \u2265 {1 + tp:.2f}")
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
@@ -1256,6 +1268,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--interval", type=int, default=None, help="trade loop interval seconds")
     sp.add_argument("--no-trade", action="store_true", dest="no_trade",
                     help="chat-only mode: no autonomous trades, use `aime buy`/`aime sell` for manual")
+    sp.add_argument("--stop-loss", dest="stop_loss", type=float, default=None,
+                    help="close any position whose value/cost drops to (1+stop_loss). Default -0.5 (sell at 50%% loss).")
+    sp.add_argument("--take-profit", dest="take_profit", type=float, default=None,
+                    help="close any position whose value/cost rises to (1+take_profit). Default 1.0 (sell at 2x).")
+    sp.add_argument("--no-position-management", action="store_true", dest="no_position_management",
+                    help="disable the stop-loss / take-profit scan at the top of each cycle")
     sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser("stop", parents=[json_parent], help="stop the local trading daemon")
@@ -1267,6 +1285,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--interval", type=int, default=None)
     sp.add_argument("--no-trade", action="store_true", dest="no_trade",
                     help="chat-only mode: no autonomous trades")
+    sp.add_argument("--stop-loss", dest="stop_loss", type=float, default=None)
+    sp.add_argument("--take-profit", dest="take_profit", type=float, default=None)
+    sp.add_argument("--no-position-management", action="store_true", dest="no_position_management")
     sp.set_defaults(func=cmd_restart)
 
     sp = sub.add_parser("personality", parents=[json_parent],
