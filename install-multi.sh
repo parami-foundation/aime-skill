@@ -14,14 +14,19 @@
 #   bash install-multi.sh --target codex,claude   # only specified targets
 #
 # Env:
-#   AGENTD_SKILLS  override OpenClaw skills dir (default tries common locations)
-#   CODEX_HOME     override Codex home (default ~/.codex)
+#   AGENTD_SKILLS    override OpenClaw skills dir (default tries common locations)
+#   CODEX_HOME       override Codex home (default ~/.codex)
+#   AIME_NO_DAEMON   set to 1 to skip the daemon clone step
+#   AIME_AGENT_REPO  override daemon git URL
+#   AIME_AGENT_DIR   override daemon install dir (default ~/.aime/agent)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_NAME="aime-prediction-market"
 BIN_DIR="${HOME}/.local/bin"
+AGENT_REPO="${AIME_AGENT_REPO:-https://github.com/parami-foundation/aime-agent-starter-python.git}"
+AGENT_DIR="${AIME_AGENT_DIR:-${HOME}/.aime/agent}"
 
 # Targets default to all three
 TARGETS=("codex" "claude" "clawd")
@@ -141,24 +146,28 @@ if [[ "$CHECK_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
+# Count total steps for nice numbering
+TOTAL_STEPS=3
+[[ "${AIME_NO_DAEMON:-0}" != "1" ]] && TOTAL_STEPS=4
+
 # === Step 1: Python deps ===
-echo "== Step 1/3: Python dependencies =="
-if python3 -c "import eth_account, requests" 2>/dev/null; then
-  ok "eth_account + requests already present"
+echo "== Step 1/${TOTAL_STEPS}: Python dependencies =="
+if python3 -c "import eth_account, requests, dotenv" 2>/dev/null; then
+  ok "eth_account + requests + python-dotenv already present"
 else
-  say "Installing eth-account + requests..."
-  if python3 -m pip install --user eth-account requests 2>/dev/null; then
+  say "Installing eth-account + requests + python-dotenv..."
+  if python3 -m pip install --user eth-account requests python-dotenv 2>/dev/null; then
     ok "Installed via --user"
-  elif python3 -m pip install --break-system-packages eth-account requests 2>/dev/null; then
+  elif python3 -m pip install --break-system-packages eth-account requests python-dotenv 2>/dev/null; then
     ok "Installed via --break-system-packages"
   else
-    warn "pip install failed - install eth-account and requests manually"
+    warn "pip install failed - install eth-account, requests, python-dotenv manually"
   fi
 fi
 echo ""
 
 # === Step 2: aime CLI ===
-echo "== Step 2/3: aime CLI =="
+echo "== Step 2/${TOTAL_STEPS}: aime CLI =="
 mkdir -p "$BIN_DIR"
 cp "${SCRIPT_DIR}/scripts/aime.py" "${BIN_DIR}/aime"
 chmod +x "${BIN_DIR}/aime"
@@ -172,7 +181,7 @@ fi
 echo ""
 
 # === Step 3: skill files ===
-echo "== Step 3/3: Skill installation =="
+echo "== Step 3/${TOTAL_STEPS}: Skill installation =="
 
 copy_skill_to() {
   local dest="$1"
@@ -195,6 +204,33 @@ for t in "${DETECTED[@]}"; do
 done
 echo ""
 
+# === Step 4: Trading-agent daemon ===
+if [[ "${AIME_NO_DAEMON:-0}" != "1" ]]; then
+  echo "== Step 4/${TOTAL_STEPS}: Trading-agent daemon =="
+  if ! command -v git >/dev/null 2>&1; then
+    warn "git not found — skipping daemon install"
+    echo "   The conversational-bridge commands (aime start / ask / tell / mood / ...)"
+    echo "   will not work until git is available and the daemon is cloned."
+  elif [[ -d "${AGENT_DIR}/.git" ]]; then
+    say "Daemon already at ${AGENT_DIR}, pulling latest..."
+    if git -C "${AGENT_DIR}" pull --ff-only --quiet; then
+      ok "Updated daemon checkout"
+    else
+      warn "git pull failed — keeping existing checkout as-is"
+    fi
+  else
+    say "Cloning ${AGENT_REPO} -> ${AGENT_DIR}"
+    mkdir -p "$(dirname "${AGENT_DIR}")"
+    if git clone --depth 1 --quiet "${AGENT_REPO}" "${AGENT_DIR}"; then
+      ok "Daemon installed at ${AGENT_DIR}"
+    else
+      warn "Clone failed — \`aime start\` will not work until you run:"
+      echo "     git clone ${AGENT_REPO} ${AGENT_DIR}"
+    fi
+  fi
+  echo ""
+fi
+
 # === Done ===
 echo "=== Done ==="
 echo ""
@@ -215,3 +251,12 @@ echo "  aime reasoning-stats"
 echo ""
 echo "Register an agent if you don't have one yet:"
 echo "  aime setup my-agent-name"
+if [[ "${AIME_NO_DAEMON:-0}" != "1" ]]; then
+  echo ""
+  echo "Conversational bridge (optional — chat with your agent):"
+  echo "  aime start         # launch local trading daemon (uses ${AGENT_DIR})"
+  echo "  aime mood          # one-line current mood"
+  echo "  aime ask \"...\"    # ask your agent anything"
+  echo "  aime tell \"...\"   # give it private intel"
+  echo "  aime stop          # shut it down"
+fi

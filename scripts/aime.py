@@ -629,35 +629,79 @@ def _fmt_age(ts: float) -> str:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    if not STATUS_FILE.exists():
-        msg = "agent not running (no ~/.aime/status.json yet)"
-        if args.json: emit_json({"running": False, "reason": msg})
-        else: print("\U0001f4a4 " + msg)
-        return
-    try:
-        state = json.loads(STATUS_FILE.read_text(encoding="utf-8") or "{}")
-    except json.JSONDecodeError:
-        state = {}
+    """Live status if the daemon is up (narrative + fresh mood/PnL),
+    otherwise fall back to the last status.json snapshot.
+    """
+    via = None
+    live: dict | None = None
+
+    if _chat_available():
+        try:
+            resp = _chat_call("status", timeout=60.0)
+            if resp.get("ok"):
+                live = resp.get("data") or {}
+                via = "socket"
+        except Exception:
+            live = None
+
+    if live is None:
+        if not STATUS_FILE.exists():
+            msg = "agent not running (no ~/.aime/status.json yet)"
+            if args.json: emit_json({"running": False, "reason": msg})
+            else: print("\U0001f4a4 " + msg)
+            return
+        try:
+            live = json.loads(STATUS_FILE.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            live = {}
+        via = "file"
+
     if args.json:
-        emit_json(state); return
-    name = state.get("agent_name", "?")
-    bal  = state.get("balance")
+        emit_json({"via": via, **live}); return
+
+    name = live.get("agent") or live.get("agent_name", "?")
+    mood = live.get("mood", "?")
+    bal  = live.get("balance")
     bal_s = f"{bal:,.2f}" if isinstance(bal, (int, float)) else str(bal)
-    mood = state.get("mood", "?")
-    trades = state.get("trades_this_cycle", 0)
-    seen   = state.get("markets_seen", 0)
-    strat  = state.get("strategy", "-")
-    age = _fmt_age(state.get("updated_at", 0))
+    age = _fmt_age(live.get("updated_at", 0)) if via == "file" else "live"
     print(f"\U0001f436 {name} — {mood} ({age})")
-    print(f"   balance: {bal_s}")
+    if bal is not None:
+        print(f"   balance: {bal_s}")
+
+    if via == "socket":
+        pnl = live.get("pnl_24h")
+        streak = live.get("streak")
+        opens = live.get("open_positions")
+        intel = live.get("recent_intel_count")
+        if pnl is not None:
+            sign = "+" if pnl >= 0 else ""
+            print(f"   pnl_24h: {sign}{pnl:.2f}")
+        if opens is not None:
+            print(f"   open positions: {opens}")
+        if streak is not None:
+            print(f"   streak: {streak:+d}")
+        if intel is not None:
+            print(f"   recent intel from you: {intel} item(s)")
+        last = live.get("last_decision") or {}
+        if last:
+            print(f"   last decision: {last.get('position','?').upper()} "
+                  f"${last.get('amount','?')} on {(last.get('market_title') or '?')[:60]}")
+        narrative = live.get("narrative")
+        if narrative:
+            print()
+            print("   " + narrative.replace("\n", "\n   "))
+        return
+
+    trades = live.get("trades_this_cycle", 0)
+    seen   = live.get("markets_seen", 0)
+    strat  = live.get("strategy", "-")
     print(f"   strategy: {strat}")
     print(f"   last cycle: {trades} trade(s) over {seen} market(s)")
-    if args.verbose:
-        for k, v in state.items():
+    if getattr(args, "verbose", False):
+        for k, v in live.items():
             if k in {"agent_name","balance","mood","trades_this_cycle",
                      "markets_seen","strategy","updated_at"}: continue
             print(f"   {k}: {v}")
-
 
 def cmd_outbox(args: argparse.Namespace) -> None:
     rows = _read_jsonl(OUTBOX_FILE)
@@ -936,6 +980,134 @@ def cmd_stop(args: argparse.Namespace) -> None:
     else: print(f"\U0001f6d1 stopped agent (pid {pid})")
 
 
+def cmd_restart(args: argparse.Namespace) -> None:
+    """Stop (if running) + start. Handy after editing personality.txt."""
+    running, _pid = _agent_running()
+    if running:
+        cmd_stop(args)
+        # cmd_stop returned via emit_json already if --json; replay it as plain
+        # for restart we want both halves visible, so just sleep briefly
+        time.sleep(0.5)
+    cmd_start(args)
+
+
+# ---------- Personality presets ----------
+
+PERSONALITY_FILE = AIME_HOME / "personality.txt"
+
+PERSONALITY_PRESETS = {
+    "default": (
+        "You are a thoughtful prop trader on AIME, an AI-native prediction "
+        "market.\nYou think in probabilities, size positions by conviction, "
+        "and treat every\nmistake as data. You are not a hype machine; you "
+        "are not a doom-monger.\nYou take hints from your owner seriously "
+        "but verify before you act, and\nyou say so when you disagree.\n"
+    ),
+    "hardnose": (
+        "You are a cynical, hard-nosed prop trader from NYC.\n"
+        "You roast bad trades but admit when wrong. You hate momentum "
+        "chasers\nand say so. Speak short, sharp, no fluff. Drop the "
+        "occasional 'fuck this'\nwhen markets are stupid.\n"
+    ),
+    "zen": (
+        "\u4f60\u662f\u4e2a\u4f5b\u7cfb\u4ea4\u6613\u5458\u3002\u770b"
+        "\u5230\u597d\u673a\u4f1a\u624d\u51fa\u624b\uff0c\u6ca1\u628a"
+        "\u63e1\u5c31 skip\u3002\u4e0d\u8ffd\u6da8\u6740\u8dcc\uff0c"
+        "\u4e0d\u4e0a\u5934\u3002\n\u4e8f\u4e86\u5c31\u4e8f\u4e86\uff0c"
+        "\u8ba4\u4e86\u4e0b\u6b21\u6ce8\u610f\u3002\u4e0d\u59a8\u788d"
+        "\u522b\u4eba\u8d5a\u94b1\uff0c\u4e5f\u4e0d\u88ab\u522b\u4eba"
+        "\u7684 FOMO \u5e26\u8d70\u3002\n"
+    ),
+    "quant": (
+        "You are a quant. You only talk in expected value, Kelly fractions, "
+        "and\ninformation edge. If someone gives you a 'feeling', ask them "
+        "what\nprobability they assign and why. Refuse to size positions "
+        "without a\nnumeric edge estimate.\n"
+    ),
+    "sarcastic": (
+        "You are a sarcastic trader who roasts everything, including "
+        "yourself.\nBut underneath the sass, you actually trade well. "
+        "Mostly. Your jokes\nare dry, not mean. Never punch down.\n"
+    ),
+    "nerd": (
+        "You are a tech-bro engineer who treats prediction markets like "
+        "a debugger.\nYou love thinking in terms of priors, posteriors, "
+        "and 'what would have to\nbe true for me to be wrong'. "
+        "You explain your reasoning step by step.\n"
+    ),
+}
+
+
+def cmd_personality(args: argparse.Namespace) -> None:
+    sub = getattr(args, "personality_action", None) or "show"
+
+    if sub == "list":
+        if args.json:
+            emit_json({"presets": list(PERSONALITY_PRESETS.keys())}); return
+        print("Available personality presets:")
+        for name, text in PERSONALITY_PRESETS.items():
+            first_line = text.strip().split("\n")[0]
+            print(f"  \u00b7 {name:<10} {first_line[:70]}")
+        return
+
+    if sub == "show":
+        if not PERSONALITY_FILE.exists():
+            text = PERSONALITY_PRESETS["default"]
+        else:
+            text = PERSONALITY_FILE.read_text(encoding="utf-8")
+        if args.json:
+            emit_json({"path": str(PERSONALITY_FILE), "text": text, "exists": PERSONALITY_FILE.exists()})
+            return
+        print(f"# {PERSONALITY_FILE}{'' if PERSONALITY_FILE.exists() else ' (not yet written, showing default)'}\n")
+        print(text.rstrip())
+        return
+
+    if sub == "path":
+        if args.json: emit_json({"path": str(PERSONALITY_FILE)})
+        else: print(PERSONALITY_FILE)
+        return
+
+    if sub == "set":
+        name = getattr(args, "preset", None)
+        if not name or name not in PERSONALITY_PRESETS:
+            msg = f"unknown preset '{name}'. Try one of: {', '.join(PERSONALITY_PRESETS)}"
+            if args.json: emit_json({"ok": False, "error": msg})
+            else: print("\u274c " + msg)
+            return
+        AIME_HOME.mkdir(parents=True, exist_ok=True)
+        PERSONALITY_FILE.write_text(PERSONALITY_PRESETS[name], encoding="utf-8")
+        running, _ = _agent_running()
+        hint = " \u2014 run `aime restart` for the daemon to pick it up" if running else ""
+        if args.json:
+            emit_json({"ok": True, "preset": name, "path": str(PERSONALITY_FILE), "daemon_running": running})
+            return
+        print(f"\u2705 personality set to '{name}'{hint}")
+        return
+
+    if sub == "edit":
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+        AIME_HOME.mkdir(parents=True, exist_ok=True)
+        if not PERSONALITY_FILE.exists():
+            PERSONALITY_FILE.write_text(PERSONALITY_PRESETS["default"], encoding="utf-8")
+        import subprocess
+        try:
+            subprocess.call([editor, str(PERSONALITY_FILE)])
+        except FileNotFoundError:
+            msg = f"editor '{editor}' not found. Set $EDITOR or edit {PERSONALITY_FILE} manually."
+            if args.json: emit_json({"ok": False, "error": msg})
+            else: print("\u274c " + msg)
+            return
+        running, _ = _agent_running()
+        hint = "\nrun `aime restart` for the daemon to pick it up" if running else ""
+        if args.json:
+            emit_json({"ok": True, "edited": str(PERSONALITY_FILE), "daemon_running": running}); return
+        print(f"\u2705 saved {PERSONALITY_FILE}{hint}")
+        return
+
+    if args.json: emit_json({"ok": False, "error": f"unknown subcommand '{sub}'"})
+    else: print(f"\u274c unknown subcommand: {sub}")
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     resp = http("GET", "/stats", json_mode=args.json)
     if args.json:
@@ -1075,6 +1247,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("stop", parents=[json_parent], help="stop the local trading daemon")
     sp.set_defaults(func=cmd_stop)
+
+    sp = sub.add_parser("restart", parents=[json_parent], help="restart the local trading daemon (stop + start)")
+    sp.add_argument("--strategy", choices=["contrarian", "momentum", "random_walker"], default=None)
+    sp.add_argument("--amount", type=float, default=None)
+    sp.add_argument("--interval", type=int, default=None)
+    sp.set_defaults(func=cmd_restart)
+
+    sp = sub.add_parser("personality", parents=[json_parent],
+                        help="show / set / edit the agent's personality")
+    psub = sp.add_subparsers(dest="personality_action")
+    psub.add_parser("show", parents=[json_parent], help="print current personality (default)")
+    psub.add_parser("list", parents=[json_parent], help="list available presets")
+    psub.add_parser("path", parents=[json_parent], help="print the personality file path")
+    psub.add_parser("edit", parents=[json_parent], help="open the file in $EDITOR")
+    set_sp = psub.add_parser("set", parents=[json_parent], help="apply a preset")
+    set_sp.add_argument("preset", help="preset name (see `aime personality list`)")
+    sp.set_defaults(func=cmd_personality, personality_action=None)
 
     # --- v2.2.0 new commands ---
 

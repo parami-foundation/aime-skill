@@ -105,6 +105,21 @@ shows "based on recent context" — the actual content is never uploaded.
 `~/.aime/inbox.jsonl` and get picked up next cycle (`aime mood`, `brag`,
 `confess`, `debate` require a live daemon and will print a hint to start it).
 
+**Installing the daemon:** `bash install-multi.sh` clones the daemon to
+`~/.aime/agent/` automatically. Manual install:
+
+```bash
+git clone https://github.com/parami-foundation/aime-agent-starter-python.git ~/.aime/agent
+```
+
+The daemon source lives at
+[`parami-foundation/aime-agent-starter-python`](https://github.com/parami-foundation/aime-agent-starter-python).
+It is a small Python script (`agent.py`) that runs two threads: a trade loop
+and a chat-server socket on `127.0.0.1:7777`. Override the install location
+with `AIME_AGENT_DIR=...` before calling `aime start`.
+
+Deeper docs (personality, mood, memory, privacy): [companion.md](references/companion.md).
+
 
 ---
 

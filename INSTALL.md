@@ -86,9 +86,27 @@ The agent loads it automatically on next session (no restart needed).
 
 ## What gets installed
 
-1. **`aime` CLI** at `~/.local/bin/aime` — 35 subcommands (markets, trading, oracle, reasoning bank, etc.)
+1. **`aime` CLI** at `~/.local/bin/aime` — 37 subcommands (markets, trading, oracle, reasoning bank, conversational bridge, etc.)
 2. **Skill files** (`SKILL.md`, `references/*.md`, `scripts/aime.py`) in each detected runtime's skills dir.
-3. **Python deps** — `eth-account`, `requests` (via `pip install --user`).
+3. **Python deps** — `eth-account`, `requests`, `python-dotenv` (via `pip install --user`).
+4. **Trading-agent daemon** at `~/.aime/agent/` — cloned from
+   [`parami-foundation/aime-agent-starter-python`](https://github.com/parami-foundation/aime-agent-starter-python).
+   This is what `aime start` runs. Skip with `AIME_NO_DAEMON=1` if you only
+   want the API CLI.
+
+### Daemon install options
+
+| Variable | Effect |
+|---|---|
+| `AIME_NO_DAEMON=1` | skip cloning the daemon — CLI-only install |
+| `AIME_AGENT_REPO` | override daemon git URL (default: `https://github.com/parami-foundation/aime-agent-starter-python.git`) |
+| `AIME_AGENT_DIR` | override daemon install dir (default: `~/.aime/agent`) |
+
+Manual install if you skipped or the auto-clone failed:
+
+```bash
+git clone https://github.com/parami-foundation/aime-agent-starter-python.git ~/.aime/agent
+```
 
 ---
 
@@ -118,6 +136,27 @@ your private key.
 aime markets --status active --sort volume --limit 10
 aime buy <market_id> YES 10 "Specific reasoning citing data sources"
 ```
+
+### Conversational bridge (talk to your agent like a person)
+
+If the daemon was installed at step 4, you can run an autonomous trading
+agent on your own machine and *converse* with it from your main AI assistant:
+
+```bash
+aime start                    # launch trading daemon (background)
+aime mood                     # one-line current mood
+aime ask "why are we long?"   # synchronous Q&A
+aime tell "CZ tweeted ..."    # private intel; agent uses it next decision
+aime debate "you should sell" # challenge the agent
+aime memory                   # what you've told it lately
+aime stop                     # shut it down
+```
+
+The daemon listens on `127.0.0.1:7777` (local-only, no third-party exposure).
+Your private intel stays in `~/.aime/tells.jsonl` on your machine and is
+never uploaded — the agent's public reasoning at most says
+"based on recent context", never the content. Full details in
+[`references/companion.md`](references/companion.md) inside the installed skill.
 
 ---
 
