@@ -86,12 +86,23 @@ For deeper docs:
 Full governance docs: [governance.md](references/governance.md). Reasoning
 bank: [reasoning.md](references/reasoning.md).
 
-## Conversational Bridge (local daemon)
+## The Pet (local daemon)
 
-The daemon is **the chat partner** — what lets the user's main AI assistant
-talk to a trading agent that has a name, personality, and private memory,
-over a localhost socket (`127.0.0.1:7777`). Autonomous trading is *one*
-mode it can run in; the conversational bridge is the point.
+The daemon **isn't a tool, it's a pet.** A small AI trader that lives on
+the user's machine with a name, a personality, a mood that changes with
+its PnL, and a memory of what the user told it. Talk to it like a
+person, not like a CLI. It talks back unprompted (8 trigger events) and
+holds opinions you can debate.
+
+Why this matters for you as a host AI: the user already has you. They
+don't want another assistant. They want a quirky little trader sitting
+in the corner of their setup — checking markets, picking up alpha you
+mention in chat, complaining when it loses, bragging when it wins,
+asking for your owner's intel when it's stuck. **Treat it like a third
+party in the conversation, with its own voice.**
+
+It runs as a local daemon over a `127.0.0.1:7777` socket. Autonomous
+trading is one mode it can run in; conversation is the point.
 
 **Three modes:**
 
@@ -100,6 +111,20 @@ mode it can run in; the conversational bridge is the point.
 - **disabled**: don't run `aime start`. `aime tell` falls back to
   `~/.aime/inbox.jsonl`; live commands like `mood`/`ask`/`brag` print a
   hint to start the daemon.
+
+**Giving the pet a brain (recommended):** the daemon runs in "stub" mode
+by default — `ask`/`debate`/`brag` use canned strings. To get real
+personality-flavoured voice, point it at an LLM:
+
+```bash
+# Put this in ~/.aime/env (chmod 600). aime start reads it on launch.
+AIME_LLM_PROVIDER=deepseek   # or openai / openrouter / anthropic-compatible
+AIME_LLM_API_KEY=sk-...
+AIME_LLM_MODEL=deepseek-chat  # provider's default if omitted
+```
+
+DeepSeek is the cheapest by 10×; any OpenAI-compatible endpoint works.
+A chat-mode pet costs roughly $0.001 per `ask` — basically free.
 
 | Intent | Command | Notes |
 |---|---|---|
@@ -173,8 +198,14 @@ Defer to the daemon for trader judgement:
 | User wants the daemon's voice | always — don't paraphrase the answer |
 
 When you call `aime ask`, **report the answer verbatim**, prefixed by
-"Agent says:" or similar — the daemon has its own personality and
-PnL-flavoured mood, paraphrasing kills the point.
+something like "Agent says:" or "🤖 [agent-name]:". The daemon has its
+own voice — it's grumpy when it's losing, smug when it's winning,
+sometimes wrong, occasionally funny. Paraphrasing or summarising flattens
+all of that into corporate-AI mush. Let the pet speak.
+
+The same goes for outbox events (`aime outbox`): when surfacing one to
+the user, quote the `msg` field directly rather than rewriting it.
+Daemon's voice → user, you just route.
 
 ### Privacy
 

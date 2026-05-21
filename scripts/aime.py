@@ -1143,12 +1143,31 @@ def cmd_start(args: argparse.Namespace) -> None:
     if getattr(args, "alerts_profit", None):
         extra += ["--alerts-profit", args.alerts_profit]
 
+    # Build daemon env: process env + layered ~/.aime/env (persistent LLM
+    # keys / overrides without polluting the user shell rc).
+    daemon_env = os.environ.copy()
+    env_file = AIME_HOME / "env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k:
+                    daemon_env[k] = v
+        except Exception as e:
+            print(f"\u26a0\ufe0f  failed to read {env_file}: {e}", file=sys.stderr)
+
     proc = subprocess.Popen(
         [sys.executable, str(agent_py), *extra],
         cwd=str(agent_py.parent),
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
+        env=daemon_env,
         start_new_session=True,
     )
     PID_FILE.write_text(str(proc.pid))
