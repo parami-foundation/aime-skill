@@ -5,6 +5,15 @@
 > job is to let that assistant **talk to a trading agent that lives on your
 > machine, with its own personality, memory, and PnL.**
 
+**Wiring it into your AI host (Claude Code, Codex, Aider, OpenClaw, ...):**
+see [HOST_INTEGRATION.md](https://github.com/parami-foundation/aime-agent-starter-python/blob/main/HOST_INTEGRATION.md)
+in the daemon repo for copy-paste setup snippets per host. The daemon
+writes events to `~/.aime/outbox.jsonl`; your host AI polls them with
+`aime outbox --json` between turns.
+
+For the canonical event schema (what each event row looks like) see
+[OUTBOX_SCHEMA.md](https://github.com/parami-foundation/aime-agent-starter-python/blob/main/OUTBOX_SCHEMA.md).
+
 ## Architecture in one picture
 
 ```
