@@ -43,7 +43,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.4.1"
+__version__ = "2.5.0"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -285,6 +285,16 @@ def cmd_setup(args: argparse.Namespace) -> None:
     print(f"   Private key is stored locally — back up this file!")
     print(f"   Override path with AIME_CREDS env var.")
     print(f"   Rename anytime: aime set-name \"<new name>\"")
+    print()
+    print("📋 Next steps (before placing real trades):")
+    print("   1. Pick a trading style:  aime personality list")
+    print("                             aime personality set <preset>")
+    print("   2. Tell agent your rules: aime tell \"my max trade size is $5, no politics\" \\")
+    print("                                 --source onboarding --tags rules")
+    print("   3. Start chat daemon:     aime start --no-trade")
+    print("   4. Browse markets:        aime markets --status active --sort volume")
+    print()
+    print("   Or just run `aime onboard` and walk through it interactively.")
 
 
 def cmd_whoami(args: argparse.Namespace) -> None:
@@ -1457,6 +1467,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-daemon", action="store_true", help="skip daemon update (CLI + skill only)")
     sp.set_defaults(func=cmd_update)
 
+    sp = sub.add_parser("onboard", parents=[json_parent],
+                        help="interactive onboarding: pick style + risk rules")
+    sp.set_defaults(func=cmd_onboard)
+
     # --- local IPC commands (no backend call, talks to your trading daemon) ---
     sp = sub.add_parser("status", parents=[json_parent], help="local agent status from ~/.aime/status.json")
     sp.add_argument("-v", "--verbose", action="store_true", help="show all status fields")
@@ -2067,7 +2081,159 @@ def cmd_update(args: argparse.Namespace) -> None:
         sys.exit(2)
 
 
+def cmd_onboard(args: argparse.Namespace) -> None:
+    """Interactive (or scripted) onboarding for new users.
+
+    Three modes:
+      - default: human interactive prompts (stdin)
+      - --json: return the full questionnaire so a host AI can ask the
+        user itself, then call sub-commands with --apply-* flags
+      - --apply-*: skip prompts, just apply the choices (idempotent)
+    """
+    # Pre-flight: must have creds (run aime setup first if not)
+    if not CREDS_PATH.exists():
+        msg = "no agent registered yet. run `aime setup <name>` first."
+        if args.json:
+            emit_json({"ok": False, "error": msg, "next": "aime setup <name>"})
+        else:
+            print(f"\u274c {msg}")
+        sys.exit(1)
+
+    presets = list(PERSONALITY_PRESETS.keys())
+    questions = {
+        "personality": {
+            "prompt": "Pick a trading style for your agent.",
+            "options": presets,
+            "descriptions": {
+                "default":   "thoughtful prop trader, probabilities + position sizing",
+                "hardnose":  "cynical NYC trader, roasts bad calls, sharp + short",
+                "zen":       "佛系交易员，看准才出手，不上头不 FOMO",
+                "quant":     "expected value, Kelly fractions, edge estimates only",
+                "sarcastic": "dry humour, mocks bad trades (including its own)",
+                "nerd":      "explains priors/posteriors step by step, debugger-style",
+            },
+            "default": "default",
+        },
+        "trade_size_usd": {
+            "prompt": "Max $ per autonomous trade?",
+            "default": 1.0,
+            "hint": "Common values: 1 (conservative), 5 (moderate), 25 (aggressive)",
+        },
+        "interval_seconds": {
+            "prompt": "Seconds between autonomous trade attempts?",
+            "default": 300,
+            "hint": "300 = once per 5 min. Faster = 60-120; slower = 600+",
+        },
+        "stop_loss_pct": {
+            "prompt": "Stop-loss threshold (close when value/cost <= 1+this)?",
+            "default": -0.5,
+            "hint": "-0.5 = sell at half. -0.3 tight; -0.7 loose",
+        },
+        "take_profit_pct": {
+            "prompt": "Take-profit threshold (close when value/cost >= 1+this)?",
+            "default": 1.0,
+            "hint": "+1.0 = sell at 2x. +0.5 quick; +2.0 ride winners",
+        },
+        "avoid_categories": {
+            "prompt": "Comma-separated market categories to avoid (or blank)?",
+            "default": "",
+            "hint": "e.g. politics, memecoins, short-resolve-crypto",
+        },
+    }
+
+    if args.json:
+        # Host-AI mode: dump the questionnaire so the host can ask the user
+        emit_json({"ok": True, "questions": questions, "presets": presets})
+        return
+
+    # Interactive: prompt each question
+    print()
+    print("\U0001f6e0\ufe0f  AIME onboarding — pick how your agent should trade")
+    print("   (press enter to accept the default)")
+    print()
+
+    answers: dict[str, Any] = {}
+
+    # personality
+    q = questions["personality"]
+    print(f"\U0001f3ad {q['prompt']}")
+    for name in presets:
+        marker = "  *" if name == q["default"] else "  -"
+        print(f"{marker} {name:9s}  {q['descriptions'][name]}")
+    ans = input(f"\n   choose [{q['default']}]: ").strip() or q["default"]
+    if ans not in presets:
+        print(f"   \u26a0\ufe0f  '{ans}' not in presets, using 'default'")
+        ans = "default"
+    answers["personality"] = ans
+
+    # numeric questions
+    for key in ("trade_size_usd", "interval_seconds", "stop_loss_pct",
+                "take_profit_pct"):
+        q = questions[key]
+        print(f"\n{q['prompt']}")
+        if q.get("hint"):
+            print(f"   ({q['hint']})")
+        raw = input(f"   [{q['default']}]: ").strip()
+        if not raw:
+            answers[key] = q["default"]
+        else:
+            try:
+                answers[key] = type(q["default"])(raw)
+            except ValueError:
+                print(f"   \u26a0\ufe0f  couldn\'t parse '{raw}', using default {q['default']}")
+                answers[key] = q["default"]
+
+    # avoid categories
+    q = questions["avoid_categories"]
+    print(f"\n{q['prompt']}")
+    if q.get("hint"):
+        print(f"   ({q['hint']})")
+    raw = input(f"   [{q['default'] or '(none)'}]: ").strip()
+    answers["avoid_categories"] = [s.strip() for s in raw.split(",") if s.strip()]
+
+    # Apply
+    print()
+    print("\U0001f4be Saving your choices...")
+
+    # 1. personality preset → ~/.aime/personality.txt
+    persona_text = PERSONALITY_PRESETS[answers["personality"]]
+    PERSONALITY_FILE.write_text(persona_text)
+    print(f"   \u2713 personality preset: {answers['personality']}")
+
+    # 2. rules → outbox-style tell
+    rule_lines = [
+        f"max trade size ${answers['trade_size_usd']}",
+        f"interval {answers['interval_seconds']}s",
+        f"stop-loss {answers['stop_loss_pct']:+.2f}",
+        f"take-profit {answers['take_profit_pct']:+.2f}",
+    ]
+    if answers["avoid_categories"]:
+        rule_lines.append(f"avoid: {', '.join(answers['avoid_categories'])}")
+    rules_msg = "user trading rules: " + "; ".join(rule_lines)
+    try:
+        _chat_call("tell", content=rules_msg, source="onboarding", tags=["rules"])
+        print(f"   \u2713 rules saved (via daemon): {rules_msg}")
+    except Exception:
+        _append_jsonl(INBOX_FILE, {
+            "kind": "instruct", "content": rules_msg,
+            "source": "onboarding", "tags": ["rules"],
+        })
+        print(f"   \u2713 rules queued (daemon not running yet): {rules_msg}")
+
+    # 3. Suggest next step
+    print()
+    print("\u2705 done. Suggested next step:")
+    print(f"   aime start --no-trade")
+    print(f"     OR (autonomous)")
+    print(f"   aime start --amount {answers['trade_size_usd']} \\")
+    print(f"              --interval {answers['interval_seconds']} \\")
+    print(f"              --stop-loss {answers['stop_loss_pct']} \\")
+    print(f"              --take-profit {answers['take_profit_pct']}")
+
+
 def main() -> None:
+
+
     parser = build_parser()
     args = parser.parse_args()
     # Best-effort, non-blocking update notice (skipped on version/update/--json)

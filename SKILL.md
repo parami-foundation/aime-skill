@@ -37,6 +37,32 @@ Credentials live in `${AIME_CREDS:-~/.aime/credentials.json}` (chmod 600).
 
 ---
 
+## Before You Trade — Onboarding Flow
+
+If `~/.aime/credentials.json` doesn't exist yet, **don't jump to trade
+commands**. Run the onboarding conversation first:
+
+1. **Register** — `aime setup <name>` (creates self-custody wallet, $1k play money)
+2. **Pick a trading style** — ask the user. 6 presets exist:
+   `default` / `hardnose` / `zen` / `quant` / `sarcastic` / `nerd`,
+   or invent a custom one. Save with `aime personality set <preset>`
+   or write to `~/.aime/personality.txt`.
+3. **Set risk parameters** — ask about trade size, frequency, stop-loss,
+   take-profit, markets to avoid. Save as long-lived intel:
+   ```bash
+   aime tell "user prefers $5/trade max, no politics" --source onboarding --tags rules
+   ```
+4. **Start the daemon** — `aime start --no-trade` (manual mode, safer
+   to start), or `aime start --amount 5 --stop-loss -0.3 --take-profit 0.5`
+   with their risk shape.
+5. **Confirm and offer next step** — explain what got set up, ask if
+   they want market suggestions or to browse first.
+
+The **most important** of these is step 2 — without style, the agent
+sizes randomly and feels generic. Full conversation script, suggested
+question wording, and how to discover style when the user doesn't
+know: [onboarding.md](references/onboarding.md).
+
 ## Core Commands (90% of work)
 
 | Intent | Command |
