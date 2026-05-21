@@ -1999,6 +1999,18 @@ def _fetch_latest_version() -> str | None:
     return None
 
 
+def _version_tuple(v):
+    parts=[]
+    for seg in (v or "").split("."):
+        try: parts.append(int(seg))
+        except ValueError: parts.append(0)
+    return tuple(parts) or (0,)
+
+
+def _version_newer(latest, installed):
+    return _version_tuple(latest) > _version_tuple(installed)
+
+
 def _maybe_check_update() -> None:
     """Background-ish update check. Runs at most once per UPDATE_CHECK_INTERVAL,
     prints a one-line hint to stderr if a newer version is available. Never
@@ -2025,7 +2037,7 @@ def _maybe_check_update() -> None:
     except Exception:
         pass
 
-    if latest and latest != __version__:
+    if latest and _version_newer(latest, __version__):
         sys.stderr.write(
             f"\u2728 aime {latest} is available (you have {__version__}). "
             f"Run `aime update` to upgrade.\n"
@@ -2038,15 +2050,17 @@ def cmd_version(args: argparse.Namespace) -> None:
         emit_json({
             "installed": __version__,
             "latest": latest,
-            "update_available": bool(latest and latest != __version__),
+            "update_available": bool(latest and _version_newer(latest, __version__)),
         })
         return
     print(f"aime CLI {__version__}")
     if latest:
-        if latest == __version__:
-            print(f"   \u2713 up to date")
+        if _version_newer(latest, __version__):
+            print(f"   ✨ {latest} is available — run `aime update`")
+        elif _version_newer(__version__, latest):
+            print(f"   (you're ahead of main: latest published is {latest})")
         else:
-            print(f"   \u2728 {latest} is available — run `aime update`")
+            print(f"   ✓ up to date")
     else:
         print("   (couldn't reach GitHub to check latest)")
 
