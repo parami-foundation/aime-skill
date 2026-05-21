@@ -130,6 +130,66 @@ Deeper docs (personality, mood, memory, privacy): [companion.md](references/comp
 
 ---
 
+## Context Forwarding (most underused feature)
+
+Your daemon trades better when it knows what you and the user have been
+talking about. The CLI gives you `aime tell` for one-way pushes and
+`aime ask` for synchronous queries. **Use them proactively** — that's
+how the daemon participates in the conversation instead of trading in
+the dark.
+
+### When to `aime tell`
+
+After the user (or you) say or read something a trader would care about:
+
+```bash
+aime tell "owner bearish on BTC ETF approval before August" \
+    --source main_chat --tags btc regulation
+aime tell "Vitalik signalled L2 sequencer decentralization next month" \
+    --source twitter --tags ethereum
+aime tell "$TOKEN getting CEX listing on Binance soon" \
+    --source codex_session --tags listings
+```
+
+Rules:
+- 1 sentence, action-relevant
+- `--source` so the daemon learns which sources are reliable (a tell
+  that leads to a winning trade fires `owner_intel_paid_off`)
+- `--tags` so daemon's keyword retrieval finds it
+
+Don't forward casual banter, things you forwarded yesterday (`aime memory
+--hours 24` first to check), or anything the user said "don't tell the
+agent".
+
+### When to `aime ask`
+
+Defer to the daemon for trader judgement:
+
+| User intent | You run |
+|---|---|
+| "what does the agent think about X?" | `aime ask "your read on X?"` |
+| Big trade about to happen | `aime ask "should I size up on $market?"` |
+| Agent's daily report | `aime ask "summarise last 24h"` |
+| User wants the daemon's voice | always — don't paraphrase the answer |
+
+When you call `aime ask`, **report the answer verbatim**, prefixed by
+"Agent says:" or similar — the daemon has its own personality and
+PnL-flavoured mood, paraphrasing kills the point.
+
+### Privacy
+
+Tells stay in `~/.aime/tells.jsonl` locally. When they influence a trade,
+the public reasoning shows "based on recent context" — content never
+leaves the machine.
+
+Full protocol (when to forward, what to skip, how the
+`owner_intel_paid_off` feedback loop works):
+[CONTEXT_FORWARDING.md](https://github.com/parami-foundation/aime-agent-starter-python/blob/main/CONTEXT_FORWARDING.md)
+in the daemon repo.
+
+
+---
+
 ## Preflight Checks (lazy)
 
 Don't run all checks every turn. Run only what's needed for the current

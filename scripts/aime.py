@@ -897,9 +897,18 @@ def cmd_tell(args: argparse.Namespace) -> None:
     is_ask = bool(getattr(args, "ask", False))
     op = "ask" if is_ask else "tell"
 
+    # Extra fields for tell: source (where this intel came from) and tags
+    # (caller-supplied hints; daemon may also auto-tag from content).
+    extra: dict[str, Any] = {}
+    if not is_ask:
+        if getattr(args, "source", None):
+            extra["source"] = args.source
+        if getattr(args, "tags", None):
+            extra["tags"] = list(args.tags)
+
     # Try the live socket first (synchronous: gets a real answer/ack).
     try:
-        resp = _chat_call(op, content=args.message)
+        resp = _chat_call(op, content=args.message, **extra)
         if resp.get("ok"):
             data = resp.get("data") or {}
             if args.json:
@@ -925,6 +934,7 @@ def cmd_tell(args: argparse.Namespace) -> None:
     row = _append_jsonl(INBOX_FILE, {
         "kind": "ask" if is_ask else "instruct",
         "content": args.message,
+        **extra,
     })
     if args.json:
         emit_json({"via": "inbox", **row}); return
@@ -1427,6 +1437,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("tell", parents=[json_parent], help="leave an instruction for your agent")
     sp.add_argument("message", help="what to tell the agent")
     sp.add_argument("--ask", action="store_true", help="mark as a question (kind=ask)")
+    sp.add_argument("--source", help="where this intel came from (e.g. 'twitter:@vitalik', 'main_chat', 'codex_session', 'web')")
+    sp.add_argument("--tags", nargs="+", help="topic tags (e.g. --tags btc macro)")
     sp.set_defaults(func=cmd_tell)
 
     sp = sub.add_parser("ask", parents=[json_parent], help="ask your agent a question (alias of `tell --ask`)")
