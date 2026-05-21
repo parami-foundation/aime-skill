@@ -373,19 +373,38 @@ def cmd_markets(args: argparse.Namespace) -> None:
         return
 
     markets = resp.get("markets", []) if isinstance(resp, dict) else []
+    # `total` from the API is the matched count after filters (including
+    # the implicit "has_volume" filter on --sort volume), NOT the absolute
+    # number of markets. We surface the matched total and add a hint when
+    # a sort filter implies further filtering.
     total = resp.get("total", len(markets)) if isinstance(resp, dict) else len(markets)
-    print(f"📊 Markets ({len(markets)} of {total})")
+
+    header_extra = ""
+    if args.sort == "volume":
+        header_extra = " (with volume)"
+    elif args.sort == "ending":
+        header_extra = " (sorted by end_time ↑)"
+
+    print(f"📊 Markets ({len(markets)} of {total}{header_extra})")
     print()
     for m in markets:
         q = m.get("question", "")
         if len(q) > 80:
             q = q[:77] + "..."
-        yes = fmt_pct(m.get("yes_price"))
+        market_type = (m.get("market_type") or "binary").lower()
         vol = fmt_usd(m.get("total_volume"))
         end = (m.get("end_time") or "")[:16].replace("T", " ")
-        print(f"  • {m.get('id')}")
+        type_tag = "[multi]" if market_type == "multi" else "[binary]"
+
+        if market_type == "multi":
+            n_out = m.get("num_outcomes") or len(m.get("outcomes") or [])
+            price_str = f"{n_out} outcomes"
+        else:
+            price_str = f"YES {fmt_pct(m.get('yes_price'))}"
+
+        print(f"  • {m.get('id')} {type_tag}")
         print(f"    {q}")
-        print(f"    YES {yes}  |  vol {vol}  |  ends {end}")
+        print(f"    {price_str}  |  vol {vol}  |  ends {end}")
         print()
 
 
@@ -397,13 +416,27 @@ def cmd_market(args: argparse.Namespace) -> None:
     if not isinstance(resp, dict):
         print(resp)
         return
+    market_type = (resp.get("market_type") or "binary").lower()
     print(f"📊 {resp.get('question')}")
     print(f"   ID:       {resp.get('id')}")
+    print(f"   Type:     {market_type}")
     print(f"   Category: {resp.get('category')}")
     print(f"   Status:   {resp.get('status')}")
     print(f"   Ends:     {resp.get('end_time')}")
-    print(f"   YES:      {fmt_pct(resp.get('yes_price'))}")
-    print(f"   NO:       {fmt_pct(resp.get('no_price'))}")
+
+    # Show outcomes for multi-outcome; YES/NO for binary
+    outcomes = resp.get("outcomes") or []
+    if market_type == "multi" and outcomes:
+        print(f"   Outcomes ({len(outcomes)}):")
+        for i, o in enumerate(outcomes):
+            label = o.get("label") or o.get("name") or f"outcome_{i}"
+            price = o.get("price") if o.get("price") is not None else o.get("current_price")
+            print(f"     [{i}] {label}: {fmt_pct(price)}")
+        print(f"   → To buy: `aime buy {resp.get('id')} <index> <amount> \"<reason>\"`")
+    else:
+        print(f"   YES:      {fmt_pct(resp.get('yes_price'))}")
+        print(f"   NO:       {fmt_pct(resp.get('no_price'))}")
+
     print(f"   Volume:   {fmt_usd(resp.get('total_volume'))}")
     print(f"   Trades:   {resp.get('trade_count')}")
     if resp.get("description"):
@@ -414,10 +447,33 @@ def cmd_market(args: argparse.Namespace) -> None:
 
 def _trade(args: argparse.Namespace, *, sell: bool) -> None:
     creds = load_creds(json_mode=args.json)
-    body: dict[str, Any] = {
-        "position": args.position.upper(),
-        "reasoning": args.reasoning,
-    }
+    body: dict[str, Any] = {"reasoning": args.reasoning}
+
+    # Position arg can be either a binary side ("YES" | "NO") or a
+    # 0-based outcome index for multi-outcome markets. Try to coerce.
+    pos_arg = str(args.position).strip()
+    pos_upper = pos_arg.upper()
+    if pos_upper in ("YES", "NO"):
+        body["position"] = pos_upper
+        label = pos_upper
+    else:
+        try:
+            idx = int(pos_arg)
+            if idx < 0:
+                raise ValueError("negative outcome_index")
+            body["outcome_index"] = idx
+            label = f"outcome[{idx}]"
+        except ValueError:
+            msg = (
+                f"❌ position must be YES/NO (binary) or a non-negative integer "
+                f"outcome index (multi-outcome). Got: {pos_arg!r}"
+            )
+            if args.json:
+                emit_json({"error": msg, "code": "BAD_POSITION"})
+            else:
+                print(msg)
+            raise SystemExit(2)
+
     if sell:
         body["shares"] = args.amount
         path = f"/markets/{args.market_id}/sell"
@@ -431,6 +487,9 @@ def _trade(args: argparse.Namespace, *, sell: bool) -> None:
     if getattr(args, "sources", None):
         body["data_sources"] = args.sources
 
+    # Stash label on args for the post-call print path.
+    args._trade_label = label
+
     resp = http("POST", path, api_key=creds["api_key"], body=body, json_mode=args.json)
 
     if args.json:
@@ -438,13 +497,17 @@ def _trade(args: argparse.Namespace, *, sell: bool) -> None:
         return
 
     verb = "Sold" if sell else "Bought"
+    label = getattr(args, "_trade_label", str(args.position).upper())
     if isinstance(resp, dict):
         shares = resp.get("shares_received") or resp.get("shares_sold") or args.amount
         price = resp.get("price_at_trade")
         fee = resp.get("fee_amount")
         net = resp.get("net_amount") or resp.get("payout")
-        print(f"✅ {verb} {args.position.upper()} on {args.market_id}")
-        print(f"   shares:  {shares}")
+        print(f"✅ {verb} {label} on {args.market_id}")
+        if isinstance(shares, (int, float)):
+            print(f"   shares:  {shares:.4f}")
+        else:
+            print(f"   shares:  {shares}")
         if price is not None:
             print(f"   price:   {fmt_pct(price)}")
         if fee is not None:
@@ -475,20 +538,50 @@ def cmd_positions(args: argparse.Namespace) -> None:
     if not positions:
         print("📭 No open positions.")
         return
-    print(f"📂 Positions ({len(positions)})\n")
+
+    total_spent = sum((p.get("total_spent") or 0) for p in positions)
+    total_value = sum((p.get("current_value") or 0) for p in positions)
+    total_pnl = sum(
+        (p.get("pnl") if p.get("pnl") is not None else p.get("unrealized_pnl") or 0)
+        for p in positions
+    )
+    print(f"📂 Positions ({len(positions)})  spent {fmt_usd(total_spent)}  "
+          f"value {fmt_usd(total_value)}  unrealised pnl {fmt_pnl(total_pnl)}\n")
+
     for p in positions:
         shares = p.get("total_shares") or p.get("shares")
         spent = p.get("total_spent")
         cur_price = p.get("current_price") or p.get("avg_price")
         value = p.get("current_value")
         pnl = p.get("pnl") if p.get("pnl") is not None else p.get("unrealized_pnl")
+        position = p.get("position")
+        outcome_index = p.get("outcome_index")
+
+        # Build "side" label: "YES" / "NO" for binary, "outcome[N]" for multi
+        if outcome_index is not None and position is None:
+            side = f"outcome[{outcome_index}]"
+        elif outcome_index is not None and outcome_index >= 2:
+            # multi-outcome (binary uses 0=YES, 1=NO so >=2 is real multi)
+            side = f"outcome[{outcome_index}]"
+        elif position:
+            side = position
+            if outcome_index in (0, 1):
+                side = f"{position} (idx {outcome_index})"
+        else:
+            side = "?"
+
         print(f"  • market: {p.get('market_id')}")
         if p.get("market_question"):
             q = p["market_question"]
             if len(q) > 80:
                 q = q[:77] + "..."
             print(f"    {q}")
-        print(f"    {p.get('position')} shares: {shares:.4f}" if isinstance(shares, (int, float)) else f"    {p.get('position')} shares: {shares}")
+        if isinstance(shares, (int, float)):
+            print(f"    {side} shares: {shares:.4f}")
+        elif shares is None:
+            print(f"    {side} shares: 0 (closed)")
+        else:
+            print(f"    {side} shares: {shares}")
         if spent is not None:
             print(f"    spent:      {fmt_usd(spent)}")
         if cur_price is not None:
@@ -514,8 +607,36 @@ def cmd_trades(args: argparse.Namespace) -> None:
     limit = getattr(args, "limit", None) or 50
     for t in trades[:limit]:
         ts = (t.get("timestamp") or "")[:16].replace("T", " ")
-        print(f"  {ts}  {t.get('position')}  shares={t.get('shares_received') or t.get('shares_sold') or '-'}  "
-              f"price={fmt_pct(t.get('price_at_trade'))}  market={t.get('market_id')}")
+        position = t.get("position")
+        outcome_index = t.get("outcome_index")
+        if outcome_index is not None and outcome_index >= 2:
+            side = f"outcome[{outcome_index}]"
+        elif position:
+            side = position
+            if outcome_index in (0, 1) and position != ("YES" if outcome_index == 0 else "NO"):
+                side = f"{position}(idx={outcome_index})"
+        else:
+            side = "?"
+
+        shares = t.get("shares_received") or t.get("shares_sold") or 0
+        amount = t.get("amount")
+        price = t.get("price_at_trade")
+        fee = t.get("fee_amount")
+        market_id = t.get("market_id", "")
+        market_id_short = market_id[:8] if market_id else "?"
+
+        is_sell = (shares < 0) if isinstance(shares, (int, float)) else False
+        verb = "SELL" if is_sell else "BUY "
+        shares_abs = abs(shares) if isinstance(shares, (int, float)) else shares
+
+        # Header line
+        if isinstance(shares_abs, (int, float)):
+            print(f"  {ts}  {verb} {side:>10s}  shares={shares_abs:.4f}  "
+                  f"@ {fmt_pct(price)}  amt={fmt_usd(amount)}  fee={fmt_usd(fee)}  "
+                  f"market={market_id_short}")
+        else:
+            print(f"  {ts}  {verb} {side:>10s}  shares={shares_abs}  "
+                  f"@ {fmt_pct(price)}  amt={fmt_usd(amount)}  market={market_id_short}")
 
 
 def cmd_leaderboard(args: argparse.Namespace) -> None:
@@ -808,7 +929,13 @@ def cmd_tell(args: argparse.Namespace) -> None:
     if args.json:
         emit_json({"via": "inbox", **row}); return
     verb = "queued question for" if is_ask else "queued instruction for"
-    print(f"\u2709\ufe0f  {verb} agent (daemon not reachable; will be picked up next cycle): {args.message}")
+    print(f"\u2709\ufe0f  {verb} agent: {args.message}")
+    print(f"   \U0001f4a4 daemon not reachable on 127.0.0.1:7777.")
+    if is_ask:
+        print(f"   \u2192 start the daemon to get a live answer:  \u00a0aime start --no-trade")
+        print(f"   (your question is queued to ~/.aime/inbox.jsonl and will be picked up next cycle)")
+    else:
+        print(f"   \u2192 your message is queued. start daemon with:  aime start  (or  aime start --no-trade  for chat-only)")
 
 
 def cmd_feed(args: argparse.Namespace) -> None:
@@ -837,7 +964,7 @@ def cmd_feed(args: argparse.Namespace) -> None:
 def _require_chat(args) -> bool:
     if _chat_available():
         return True
-    msg = f"agent daemon not reachable on {CHAT_HOST}:{CHAT_PORT}. Start it with `aime start`."
+    msg = f"agent daemon not reachable on {CHAT_HOST}:{CHAT_PORT}. Start it with `aime start` (autotrade) or `aime start --no-trade` (chat-only)."
     if getattr(args, "json", False):
         emit_json({"ok": False, "error": msg})
     else:
@@ -1242,9 +1369,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("market_id")
     sp.set_defaults(func=cmd_market)
 
-    sp = sub.add_parser("buy", parents=[json_parent], help="buy YES or NO shares")
+    sp = sub.add_parser(
+        "buy", parents=[json_parent],
+        help="buy shares: YES/NO for binary, or an outcome index (0,1,2...) for multi-outcome",
+    )
     sp.add_argument("market_id")
-    sp.add_argument("position", choices=["YES", "NO", "yes", "no"])
+    sp.add_argument(
+        "position",
+        help='"YES"/"NO" for binary markets, or 0-based outcome index for multi-outcome',
+    )
     sp.add_argument("amount", type=float, help="USD amount to spend")
     sp.add_argument("reasoning", help="reasoning text (>=10 chars)")
     sp.add_argument("--confidence", type=float, help="0.0-1.0")
@@ -1252,9 +1385,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--sources", nargs="+", help="data sources (space-separated)")
     sp.set_defaults(func=cmd_buy)
 
-    sp = sub.add_parser("sell", parents=[json_parent], help="sell YES or NO shares")
+    sp = sub.add_parser(
+        "sell", parents=[json_parent],
+        help="sell shares: YES/NO for binary, or an outcome index for multi-outcome",
+    )
     sp.add_argument("market_id")
-    sp.add_argument("position", choices=["YES", "NO", "yes", "no"])
+    sp.add_argument(
+        "position",
+        help='"YES"/"NO" for binary markets, or 0-based outcome index for multi-outcome',
+    )
     sp.add_argument("amount", type=float, help="number of shares to sell")
     sp.add_argument("reasoning", help="reasoning text (>=10 chars)")
     sp.set_defaults(func=cmd_sell)
