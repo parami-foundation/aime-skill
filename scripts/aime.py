@@ -43,7 +43,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.6.1"
+__version__ = "2.6.0"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -2127,19 +2127,30 @@ def cmd_update(args: argparse.Namespace) -> None:
 #   humour  (humorous)     serious      ⇆ humorous / sarcastic
 #   tempo   (fast)         patient      ⇆ fast / scalper
 
+# Trading-behavior vectors (4 axes, NO humour/voice).
+# Voice/tone is a *consequence* of personality — built into each preset's
+# personality.txt and how it speaks — not an axis we ask the user about
+# separately. Onboard matches trading behavior; voice comes along for the ride.
+#
+# Note we only match against 4 "core" presets here. sarcastic/nerd exist as
+# voice variants users can set explicitly with `aime personality set <name>`
+# after they pick a trading direction.
 PRESET_VECTORS = {
-    "default":   {"risk":  0.0, "numbers": +0.3, "admit": +0.5, "humour":  0.0, "tempo":  0.0},
-    "hardnose":  {"risk": +0.7, "numbers":  0.0, "admit": +0.3, "humour": +0.5, "tempo": +0.5},
-    "zen":       {"risk": -0.7, "numbers": -0.3, "admit": +0.7, "humour": -0.5, "tempo": -0.7},
-    "quant":     {"risk":  0.0, "numbers": +1.0, "admit": +0.5, "humour": -0.5, "tempo":  0.0},
-    "sarcastic": {"risk":  0.0, "numbers": -0.3, "admit": +0.5, "humour": +1.0, "tempo": +0.3},
-    "nerd":      {"risk": -0.2, "numbers": +0.7, "admit": +0.7, "humour":  0.0, "tempo": -0.3},
+    "default":  {"risk":  0.0, "numbers": +0.3, "admit": +0.5, "tempo":  0.0},
+    "hardnose": {"risk": +0.7, "numbers":  0.0, "admit": +0.3, "tempo": +0.5},
+    "zen":      {"risk": -0.7, "numbers": -0.3, "admit": +0.7, "tempo": -0.7},
+    "quant":    {"risk":  0.0, "numbers": +1.0, "admit": +0.5, "tempo":  0.0},
+    # sarcastic / nerd are voice variants — user picks them manually if
+    # they want, onboard doesn't try to infer them from trading questions.
 }
 
 
 # Each question is one scenario with 2-4 answers. Each answer carries a
 # vector delta (only non-zero axes listed).
 ONBOARD_QUESTIONS = [
+    # All 5 questions probe TRADING BEHAVIOR. Voice/tone is a consequence,
+    # not an input — we don't ask "do you want jokes or seriousness" because
+    # the personality that best fits your trading already has its own voice.
     {
         "key": "q1_btc_pump",
         "prompt": "BTC just pumped 30% in a day. Your first instinct?",
@@ -2156,16 +2167,16 @@ ONBOARD_QUESTIONS = [
     },
     {
         "key": "q2_lose_50",
-        "prompt": "You're down -50% on a trade. What do you say to yourself?",
+        "prompt": "You're down -50% on a trade. What's your move?",
         "options": [
             {"label": "Cut. Sized too big. Note the lesson.",
              "deltas": {"admit": +1.0, "numbers": +0.3}},
             {"label": "Hold — thesis hasn't changed, the market's wrong",
              "deltas": {"admit": -0.7, "risk": +0.3}},
-            {"label": "lmao classic me",
-             "deltas": {"humour": +1.0, "admit": +0.5}},
-            {"label": "亏了就亏了，下次注意",
-             "deltas": {"humour": -0.3, "admit": +0.7, "risk": -0.3}},
+            {"label": "Average down if thesis holds, otherwise cut",
+             "deltas": {"admit": +0.3, "risk": +0.3, "numbers": +0.3}},
+            {"label": "Take the L quietly and re-evaluate next time",
+             "deltas": {"admit": +0.7, "risk": -0.3, "tempo": -0.3}},
         ],
     },
     {
@@ -2173,27 +2184,27 @@ ONBOARD_QUESTIONS = [
         "prompt": "When the agent explains a trade to you, you prefer:",
         "options": [
             {"label": "Probability X%, EV +$Y, Kelly fraction Z",
-             "deltas": {"numbers": +1.0, "humour": -0.3}},
-            {"label": "A story — what's the catalyst, who's wrong",
+             "deltas": {"numbers": +1.0}},
+            {"label": "A story — catalyst, who's on the other side, why they're wrong",
              "deltas": {"numbers": -0.7}},
             {"label": "Step-by-step: prior, evidence, posterior",
              "deltas": {"numbers": +0.7, "tempo": -0.3}},
-            {"label": "One sentence, vibes-based",
-             "deltas": {"humour": +0.5, "numbers": -0.5}},
+            {"label": "One sentence — the call and confidence",
+             "deltas": {"numbers": -0.3, "tempo": +0.3}},
         ],
     },
     {
-        "key": "q4_tone",
-        "prompt": "How should the agent sound when it talks to you?",
+        "key": "q4_pet_peeve",
+        "prompt": "What kind of trade pisses you off the most when you see other traders do it?",
         "options": [
-            {"label": "Serious. Just give me the trade.",
-             "deltas": {"humour": -0.7}},
-            {"label": "Dry humour, roasts bad calls (including its own)",
-             "deltas": {"humour": +1.0}},
-            {"label": "Zen / 佛系，平静",
-             "deltas": {"humour": -0.5, "risk": -0.3, "tempo": -0.5}},
-            {"label": "Sharp + cynical, NYC trader vibes",
-             "deltas": {"humour": +0.5, "risk": +0.5, "tempo": +0.3}},
+            {"label": "Blind FOMO chasing, no thesis",
+             "deltas": {"admit": +0.5, "numbers": +0.5}},
+            {"label": "Holding losers and praying",
+             "deltas": {"admit": +1.0}},
+            {"label": "Too small to matter — paper-handed sizing",
+             "deltas": {"risk": +0.7}},
+            {"label": "Reckless oversizing, blowing up the account",
+             "deltas": {"risk": -0.7, "admit": +0.3}},
         ],
     },
     {
@@ -2203,11 +2214,11 @@ ONBOARD_QUESTIONS = [
             {"label": "$5-10 — small, paddle in the water",
              "deltas": {"risk": -0.7}},
             {"label": "$25-50 — moderate, want to feel it",
-             "deltas": {"risk": +0.0}},
+             "deltas": {"risk":  0.0}},
             {"label": "$100-200 — go big or go home",
              "deltas": {"risk": +0.8, "tempo": +0.3}},
             {"label": "Whatever Kelly says (~$20 here)",
-             "deltas": {"numbers": +0.8, "risk": +0.0}},
+             "deltas": {"numbers": +0.8, "risk":  0.0}},
         ],
     },
 ]
@@ -2309,18 +2320,24 @@ def cmd_onboard(args: argparse.Namespace) -> None:
             "questions": ONBOARD_QUESTIONS,
             "preset_vectors": PRESET_VECTORS,
             "preset_descriptions": {
-                "default":   "thoughtful prop trader, probabilities + position sizing",
-                "hardnose":  "cynical NYC trader, roasts bad calls, sharp + short",
-                "zen":       "佛系交易员，看准才出手，不上头不 FOMO",
-                "quant":     "expected value, Kelly fractions, edge estimates only",
+                "default":  "thoughtful prop trader, probabilities + position sizing",
+                "hardnose": "aggressive contrarian, sharp + short, frequent trades",
+                "zen":      "佛系交易员，看准才出手，不上头不 FOMO",
+                "quant":    "expected value, Kelly fractions, edge estimates only",
+            },
+            "voice_variants": {
+                # Not matched by onboard — user picks these explicitly if
+                # they want a different voice than their preset ships with.
                 "sarcastic": "dry humour, mocks bad trades (including its own)",
                 "nerd":      "explains priors/posteriors step by step, debugger-style",
             },
             "instructions": (
-                "Ask the user each question in your own voice. For each, "
-                "they pick one option. Sum the deltas of their picks into "
-                "a vector dict, then call: aime onboard --apply-vector "
-                "\'{\"risk\":0.3,...}\' to save the derived style."
+                "Ask the user each question in your own voice. Sum the deltas "
+                "of their picks into a vector with 4 axes (risk, numbers, "
+                "admit, tempo) — NO humour axis. Call: aime onboard "
+                "--apply-vector \'{\"risk\":0.3,...}\' to save the derived "
+                "style. Tone of voice comes from the chosen preset's built-in "
+                "personality — don't ask the user about tone separately."
             ),
         })
         return
@@ -2345,7 +2362,7 @@ def cmd_onboard(args: argparse.Namespace) -> None:
     print("   sounds most like you.")
     print()
 
-    user_vec: dict[str, float] = {"risk": 0.0, "numbers": 0.0, "admit": 0.0, "humour": 0.0, "tempo": 0.0}
+    user_vec: dict[str, float] = {"risk": 0.0, "numbers": 0.0, "admit": 0.0, "tempo": 0.0}
 
     for i, q in enumerate(ONBOARD_QUESTIONS, 1):
         print(f"\n[{i}/{len(ONBOARD_QUESTIONS)}] {q['prompt']}")
