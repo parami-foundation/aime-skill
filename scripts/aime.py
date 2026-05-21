@@ -43,6 +43,14 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
+__version__ = "2.4.0"
+
+# Repo URLs for self-update
+SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
+SKILL_RAW_BASE = "https://raw.githubusercontent.com/parami-foundation/aime-skill/main"
+SKILL_INSTALL_SCRIPT = f"{SKILL_RAW_BASE}/install.sh"
+SKILL_VERSION_URL = f"{SKILL_RAW_BASE}/VERSION"
+
 API_DEFAULT = "https://api.aime.bot/api/v1"
 API = os.environ.get("AIME_API", API_DEFAULT).rstrip("/")
 CREDS_PATH = Path(os.environ.get("AIME_CREDS", str(Path.home() / ".aime" / "credentials.json")))
@@ -1423,6 +1431,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("stats", parents=[json_parent], help="public platform stats")
     sp.set_defaults(func=cmd_stats)
 
+    sp = sub.add_parser("version", parents=[json_parent], help="show installed version + check for updates")
+    sp.set_defaults(func=cmd_version)
+
+    sp = sub.add_parser("update", parents=[json_parent], help="re-run the installer to upgrade in place")
+    sp.add_argument("--no-daemon", action="store_true", help="skip daemon update (CLI + skill only)")
+    sp.set_defaults(func=cmd_update)
+
     # --- local IPC commands (no backend call, talks to your trading daemon) ---
     sp = sub.add_parser("status", parents=[json_parent], help="local agent status from ~/.aime/status.json")
     sp.add_argument("-v", "--verbose", action="store_true", help="show all status fields")
@@ -1902,9 +1917,127 @@ def cmd_agent_stats(args: argparse.Namespace) -> None:
             print(f"   {label:18s} {v}")
 
 
+# ---------------------------------------------------------------------------
+# Self-update
+# ---------------------------------------------------------------------------
+
+UPDATE_CHECK_FILE = Path.home() / ".aime" / ".last-update-check"
+UPDATE_CHECK_INTERVAL = 86400  # 1 day
+
+
+def _fetch_latest_version() -> str | None:
+    """Fetch the latest version string from the skill repo. Returns None
+    on any failure (offline, repo down, etc.) — never blocks the CLI."""
+    try:
+        r = requests.get(SKILL_VERSION_URL, timeout=3)
+        if r.status_code == 200:
+            return r.text.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _maybe_check_update() -> None:
+    """Background-ish update check. Runs at most once per UPDATE_CHECK_INTERVAL,
+    prints a one-line hint to stderr if a newer version is available. Never
+    blocks the actual command, never errors out."""
+    # Skip the check if user asked for JSON output (don't pollute stdout).
+    if "--json" in sys.argv:
+        return
+    # Skip on version/update/--help commands (avoid recursion / noise).
+    if any(arg in sys.argv for arg in ("version", "update", "--help", "-h")):
+        return
+
+    try:
+        if UPDATE_CHECK_FILE.exists():
+            mtime = UPDATE_CHECK_FILE.stat().st_mtime
+            if time.time() - mtime < UPDATE_CHECK_INTERVAL:
+                return
+    except Exception:
+        pass
+
+    latest = _fetch_latest_version()
+    try:
+        UPDATE_CHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        UPDATE_CHECK_FILE.touch()
+    except Exception:
+        pass
+
+    if latest and latest != __version__:
+        sys.stderr.write(
+            f"\u2728 aime {latest} is available (you have {__version__}). "
+            f"Run `aime update` to upgrade.\n"
+        )
+
+
+def cmd_version(args: argparse.Namespace) -> None:
+    latest = _fetch_latest_version()
+    if args.json:
+        emit_json({
+            "installed": __version__,
+            "latest": latest,
+            "update_available": bool(latest and latest != __version__),
+        })
+        return
+    print(f"aime CLI {__version__}")
+    if latest:
+        if latest == __version__:
+            print(f"   \u2713 up to date")
+        else:
+            print(f"   \u2728 {latest} is available — run `aime update`")
+    else:
+        print("   (couldn't reach GitHub to check latest)")
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    """Re-run the installer to upgrade in place."""
+    import subprocess
+
+    if args.json:
+        # In JSON mode, just report what would happen and exit
+        latest = _fetch_latest_version()
+        emit_json({
+            "installed": __version__,
+            "latest": latest,
+            "command": f"curl -fsSL {SKILL_INSTALL_SCRIPT} | bash",
+        })
+        return
+
+    print(f"\U0001f504 updating aime (current: {__version__})...")
+    print(f"   running: curl -fsSL {SKILL_INSTALL_SCRIPT} | bash")
+    print()
+
+    extra_env = os.environ.copy()
+    if args.no_daemon:
+        extra_env["AIME_NO_DAEMON"] = "1"
+
+    # Use bash explicitly so set -e etc. behave consistently.
+    try:
+        r = subprocess.run(
+            ["bash", "-c", f"curl -fsSL {SKILL_INSTALL_SCRIPT} | bash"],
+            env=extra_env,
+        )
+        if r.returncode == 0:
+            print()
+            print("\u2705 done. Verify with `aime version`.")
+        else:
+            print()
+            print(f"\u274c installer exited with status {r.returncode}")
+            sys.exit(r.returncode)
+    except FileNotFoundError:
+        print("\u274c bash or curl not found. Manual install instructions:")
+        print(f"   {SKILL_REPO_URL}#installation")
+        sys.exit(2)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    # Best-effort, non-blocking update notice (skipped on version/update/--json)
+    try:
+        _maybe_check_update()
+    except Exception:
+        pass
     try:
         args.func(args)
     except KeyboardInterrupt:
