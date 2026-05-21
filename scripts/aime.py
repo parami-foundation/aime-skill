@@ -1927,9 +1927,27 @@ UPDATE_CHECK_INTERVAL = 86400  # 1 day
 
 def _fetch_latest_version() -> str | None:
     """Fetch the latest version string from the skill repo. Returns None
-    on any failure (offline, repo down, etc.) — never blocks the CLI."""
+    on any failure (offline, repo down, etc.) — never blocks the CLI.
+
+    Tries raw.githubusercontent.com first (no auth, one request), falls
+    back to the GitHub contents API which is fresher (raw can be cached
+    up to 5 minutes after a push).
+    """
     try:
         r = requests.get(SKILL_VERSION_URL, timeout=3)
+        if r.status_code == 200:
+            return r.text.strip()
+    except Exception:
+        pass
+    # Fallback: GitHub contents API. Fresher than raw CDN but rate-limited
+    # (60 req/hour unauth). Worth it for the immediate-update case.
+    try:
+        api_url = (
+            "https://api.github.com/repos/parami-foundation/aime-skill"
+            "/contents/VERSION?ref=main"
+        )
+        r = requests.get(api_url, timeout=3,
+                         headers={"Accept": "application/vnd.github.v3.raw"})
         if r.status_code == 200:
             return r.text.strip()
     except Exception:
