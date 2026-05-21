@@ -1,123 +1,133 @@
-# Onboarding: First Conversation With a New User
+# Onboarding: Discovering Trading Style Through Scenario Questions
 
-> When you (an AI assistant) load this skill and see no
-> `~/.aime/credentials.json` — or when the user re-engages after a long
-> gap — follow this flow before you do anything else.
+> The user **doesn't know** what `hardnose` vs `quant` vs `zen` means
+> in trading terms. Forcing them to pick from a preset list is the
+> single biggest reason new users bail. Instead: ask 5 scenario
+> questions, sum the deltas into a vector, derive the preset.
 
-## First-Run: What to Do When This Skill Loads
+## The flow (host AI version)
 
-**You are an AI assistant. This skill gives your user (or you, as an
-autonomous agent) access to AIME prediction markets. Do not jump to
-trading commands. Have a conversation first.**
-
-On the very first invocation (no `~/.aime/credentials.json` yet) — or
-when the user re-engages after a long gap — run this onboarding flow:
-
-### Step 1 — Identify the trader
-
-Ask the user **once**, briefly:
-
-> "Want me to register a fresh AIME agent for you? It'll get a self-
-> custody wallet on your machine and $1,000 of play-money to start.
-> Name it whatever you like."
-
-If they say yes → `aime setup <name>`. Save the credentials path they
-get back. Do **not** trade yet.
-
-If they already have credentials, run `aime whoami` and confirm
-identity.
-
-### Step 2 — Pick a trading style (the part most agents skip)
-
-This is the **most important conversation in this skill**. Without it,
-the agent has no style, sizes positions randomly, and looks dumb to
-the user. Ask, in plain language:
-
-> "Before I start trading on your behalf, I need to know how you want
-> me to trade. Pick the closest one — or tell me to invent something
-> custom:
->
-> - **default** — thoughtful prop trader, probabilities + position sizing
-> - **hardnose** — cynical NYC trader, roasts bad calls, sharp + short
-> - **zen** — 佛系交易员，看准才出手，不上头不 FOMO
-> - **quant** — only talks expected value, Kelly fractions, edge estimates
-> - **sarcastic** — dry humour, mocks bad trades (including its own)
-> - **nerd** — explains priors/posteriors step by step, debugger-style
->
-> Or describe your own style in 2-3 sentences and I'll spin one up."
-
-Then **also** ask the trading parameters:
-
-> "And — risk shape:
-> - **trade size**: default $1 per trade. Bump up when you trust me.
->   What feels right?
-> - **frequency**: default ~ once every 5 min. Faster? Slower?
-> - **stop-loss / take-profit**: default -50% / +100%. Looser or tighter?
-> - **markets to avoid**: any categories you don't want me touching
->   (politics? memecoins? short-resolve crypto?)"
-
-Don't grill them. If they shrug, defaults are sensible — say so and
-move on. The point is to **let them feel the choice was theirs**.
-
-### Step 3 — Persist the style
-
-Save what you learned:
-
-```bash
-# style preset
-aime personality set <preset_name>
-
-# or custom — write a paragraph to ~/.aime/personality.txt
-echo "<the user's described style, in 2nd person>" > ~/.aime/personality.txt
-
-# remember their other rules as long-lived intel
-aime tell "user prefers max $5/trade, no politics markets" \
-    --source onboarding --tags rules
-aime tell "user wants tight risk: stop -30% take +50%" \
-    --source onboarding --tags rules
+```
+1. Run: aime onboard --json
+2. Get back 5 questions + 6 preset vectors + descriptions
+3. Ask the user each question in your own voice
+4. For each answer, accumulate the option's deltas into a vector:
+       {risk, numbers, admit, humour, tempo}
+5. Run: aime onboard --apply-vector '<json>'
+6. CLI picks best-fit preset (cosine similarity) AND derives
+   trade size / interval / stop-loss / take-profit from the same
+   vector. Persists everything to ~/.aime/personality.txt +
+   queues a rules-tell to the daemon memory.
+7. Show user the derived preset, runner-ups, and suggested
+   `aime start` invocation.
 ```
 
-The `tell` form matters: those become **memory the daemon factors into
-every decision**, so the daemon stays aligned even between sessions.
+## The 5 questions
 
-### Step 4 — Start the daemon with their style
+```
+1. BTC just pumped 30% in a day. Your first instinct?
+   - Short the breakout — too far, too fast
+   - Wait it out — chase = pain
+   - Check funding/open-interest first, then decide
+   - Ride it with a tight stop
 
-```bash
-# manual trading (recommended start — user feels in control)
-aime start --no-trade
+2. You're down -50% on a trade. What do you say to yourself?
+   - Cut. Sized too big. Note the lesson.
+   - Hold — thesis hasn't changed, the market's wrong
+   - lmao classic me
+   - 亏了就亏了，下次注意
 
-# OR autonomous trading with their risk shape:
-aime start --amount 5 --interval 300 --stop-loss -0.3 --take-profit 0.5
+3. When the agent explains a trade to you, you prefer:
+   - Probability X%, EV +$Y, Kelly fraction Z
+   - A story — what's the catalyst, who's wrong
+   - Step-by-step: prior, evidence, posterior
+   - One sentence, vibes-based
+
+4. How should the agent sound when it talks to you?
+   - Serious. Just give me the trade.
+   - Dry humour, roasts bad calls (including its own)
+   - Zen / 佛系，平静
+   - Sharp + cynical, NYC trader vibes
+
+5. Default position size on a 65%-confidence trade with $1000?
+   - $5-10 — small, paddle in the water
+   - $25-50 — moderate, want to feel it
+   - $100-200 — go big or go home
+   - Whatever Kelly says (~$20 here)
 ```
 
-### Step 5 — Confirm and explain what's next
+## Why this works
 
-> "Set up. Your agent is **<name>**, running **<style>**, max $X/trade.
-> It'll talk back when things happen — wins, losses, milestones. I'll
-> surface them to you as they come.
->
-> Want me to suggest 2-3 markets to start with, or do you want to
-> browse first?"
+Each option carries 1-3 axis deltas. Question 1 mostly drives `risk`
+and `tempo`; question 3 drives `numbers`; question 4 drives `humour`;
+question 5 again drives `risk`. The redundancy is intentional — if
+the user answers inconsistently (e.g. "ride the breakout" but
+"$5-10 size") the conflicting signals cancel out and the user ends
+up near `default`, which is the safe baseline.
 
-Then go to normal trading flow (Core Commands below).
+## When the user pushes back
 
----
+| User says | You do |
+|---|---|
+| "I don't trade" / "no opinion" | Skip onboard, run with `default` preset and `aime start --no-trade --amount 1` |
+| "I want to customise more" | Show `aime personality list` for the 6 presets; or have them write `~/.aime/personality.txt` directly |
+| "I want different presets per market" | Not supported yet. Suggest tracking it as a tell: `aime tell "for AI markets use aggressive sizing; for politics use conservative" --tags strategy` |
+| "Just pick for me" | Use `default` preset, defaults: $1/trade, 5 min interval, -0.5/+1.0 risk |
 
-## Trading Style — Pick or Discover
+## Style is reversible
 
-If the user **doesn't know** their trading style (most common case),
-help them discover it instead of guessing. Three questions, max:
+Tell the user upfront: **picking a style now isn't a commitment**.
+Anytime they want to change:
 
-1. **Risk appetite?** "Conservative (skip when unsure) or aggressive
-   (size up on conviction)?" → maps to `hardnose` / `zen` / `default`
-2. **Reasoning preference?** "Do you want me to explain trades with
-   numbers (probabilities, EV) or with stories (catalysts, themes)?" →
-   `quant` vs `default` vs `nerd`
-3. **Tone?** "Should I sound serious, dry-humour, or zen?" → roughly
-   maps to the remaining axis
+```bash
+aime personality list
+aime personality set <name>
+# OR re-run the questionnaire:
+aime onboard
+```
 
-Then propose: "Sounds like **<X>** fits — try it for a week and we'll
-adjust." Don't lock them in; `aime personality set <other>` switches
-anytime.
+The daemon picks up the new personality on next reflection (or restart
+with `aime restart`).
 
----
+## Vector-axis cheat sheet (for host AI)
+
+| Axis | Negative (-1) | Positive (+1) |
+|---|---|---|
+| `risk` | conservative, skip uncertain | aggressive, size up |
+| `numbers` | stories, narratives, catalysts | EV, Kelly, probabilities |
+| `admit` | defend the thesis, double down | cut and re-evaluate fast |
+| `humour` | serious, dry, no fluff | sarcastic, jokes, roasts |
+| `tempo` | patient, slow, hold for days | scalper, fast in-out |
+
+## Preset vectors (for reference)
+
+```jsonc
+{
+  "default":   {"risk": 0.0, "numbers": +0.3, "admit": +0.5, "humour":  0.0, "tempo":  0.0},
+  "hardnose":  {"risk": +0.7,"numbers":  0.0, "admit": +0.3, "humour": +0.5, "tempo": +0.5},
+  "zen":       {"risk": -0.7,"numbers": -0.3, "admit": +0.7, "humour": -0.5, "tempo": -0.7},
+  "quant":     {"risk":  0.0,"numbers": +1.0, "admit": +0.5, "humour": -0.5, "tempo":  0.0},
+  "sarcastic": {"risk":  0.0,"numbers": -0.3, "admit": +0.5, "humour": +1.0, "tempo": +0.3},
+  "nerd":      {"risk": -0.2,"numbers": +0.7, "admit": +0.7, "humour":  0.0, "tempo": -0.3}
+}
+```
+
+Pick = argmax cosine similarity. Derived trade params:
+
+| Vector | Trade size | Interval | Stop-loss | Take-profit |
+|---|---|---|---|---|
+| `risk ≤ -0.5` | $1 | (tempo-driven) | -0.3 | +0.5 |
+| `risk ≤ 0` | $5 | (tempo-driven) | -0.5 | +1.0 |
+| `risk ≤ +0.4` | $15 | (tempo-driven) | -0.5 | +1.0 |
+| `risk > +0.4` | $30 | (tempo-driven) | -0.7 | +2.0 |
+
+| Tempo | Interval (s) |
+|---|---|
+| `tempo ≤ -0.5` | 600 |
+| `tempo ≤ 0` | 300 |
+| `tempo ≤ +0.4` | 180 |
+| `tempo > +0.4` | 90 |
+
+This is intentionally simple — adjustments are easier than getting it
+right on first try. Tell the user: "Try this for a few days; we can
+tighten it if you find yourself overruling the agent."

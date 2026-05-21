@@ -43,25 +43,27 @@ If `~/.aime/credentials.json` doesn't exist yet, **don't jump to trade
 commands**. Run the onboarding conversation first:
 
 1. **Register** — `aime setup <name>` (creates self-custody wallet, $1k play money)
-2. **Pick a trading style** — ask the user. 6 presets exist:
-   `default` / `hardnose` / `zen` / `quant` / `sarcastic` / `nerd`,
-   or invent a custom one. Save with `aime personality set <preset>`
-   or write to `~/.aime/personality.txt`.
-3. **Set risk parameters** — ask about trade size, frequency, stop-loss,
-   take-profit, markets to avoid. Save as long-lived intel:
+2. **Discover trading style with 5 scenario questions** — run
+   `aime onboard --json` to get the questionnaire. Each question has 3-4
+   options; each option contributes a vector delta on 5 axes (risk,
+   numbers, admit, humour, tempo). Ask the user in your own voice,
+   sum the deltas, then:
    ```bash
-   aime tell "user prefers $5/trade max, no politics" --source onboarding --tags rules
+   aime onboard --apply-vector '{"risk":0.5,"numbers":0.7,"admit":0.3,"humour":-0.2,"tempo":0.1}'
    ```
-4. **Start the daemon** — `aime start --no-trade` (manual mode, safer
-   to start), or `aime start --amount 5 --stop-loss -0.3 --take-profit 0.5`
-   with their risk shape.
-5. **Confirm and offer next step** — explain what got set up, ask if
-   they want market suggestions or to browse first.
+   The CLI matches the vector to the closest preset (cosine similarity)
+   and **also** derives trade size, interval, stop-loss, take-profit
+   from the same vector. Personality.txt + rules tell are auto-saved.
+3. **Confirm and start the daemon** — show the user their derived
+   preset and suggested params; then `aime start --no-trade` (manual,
+   safer to start) or `aime start --amount X --interval Y ...` with
+   their derived shape.
 
-The **most important** of these is step 2 — without style, the agent
-sizes randomly and feels generic. Full conversation script, suggested
-question wording, and how to discover style when the user doesn't
-know: [onboarding.md](references/onboarding.md).
+**Don't ask "pick a preset"** — most users have no idea what
+`hardnose` vs `quant` vs `zen` means in trading terms. The scenario
+questions ("BTC just pumped 30%, your first instinct?") are concrete
+and the derivation does the mapping. Full script, alternate question
+wording, and edge cases: [onboarding.md](references/onboarding.md).
 
 ## Core Commands (90% of work)
 

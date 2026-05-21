@@ -1467,8 +1467,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-daemon", action="store_true", help="skip daemon update (CLI + skill only)")
     sp.set_defaults(func=cmd_update)
 
-    sp = sub.add_parser("onboard", parents=[json_parent],
-                        help="interactive onboarding: pick style + risk rules")
+    sp = sub.add_parser(
+        "onboard", parents=[json_parent],
+        help="interactive onboarding: 5 scenario questions → trading style + risk rules",
+    )
+    sp.add_argument(
+        "--apply-vector",
+        help=(
+            'JSON dict of axis values (e.g. \'{"risk":0.5,"numbers":0.7,'
+            '"admit":0.3,"humour":-0.2,"tempo":0.1}\') — host AI feeds '
+            "back the summed deltas from the user\'s answers, CLI derives "
+            "preset + trade params + persists everything"
+        ),
+    )
     sp.set_defaults(func=cmd_onboard)
 
     # --- local IPC commands (no backend call, talks to your trading daemon) ---
@@ -2081,14 +2092,184 @@ def cmd_update(args: argparse.Namespace) -> None:
         sys.exit(2)
 
 
-def cmd_onboard(args: argparse.Namespace) -> None:
-    """Interactive (or scripted) onboarding for new users.
+# ---------------------------------------------------------------------------
+# Onboarding — discover trading style through scenario questions
+# ---------------------------------------------------------------------------
 
-    Three modes:
-      - default: human interactive prompts (stdin)
-      - --json: return the full questionnaire so a host AI can ask the
-        user itself, then call sub-commands with --apply-* flags
-      - --apply-*: skip prompts, just apply the choices (idempotent)
+# 5 axes, each runs -1..+1. A user's answer to each question contributes
+# a delta on one axis. Presets each have an "ideal vector" — we pick the
+# preset with the highest cosine similarity to the user's vector.
+
+# Axis meanings (positive direction in parens):
+#   risk    (aggressive)   conservative ⇆ aggressive
+#   numbers (numbers)      stories      ⇆ numbers / EV / math
+#   admit   (admit fast)   defend       ⇆ admit when wrong
+#   humour  (humorous)     serious      ⇆ humorous / sarcastic
+#   tempo   (fast)         patient      ⇆ fast / scalper
+
+PRESET_VECTORS = {
+    "default":   {"risk":  0.0, "numbers": +0.3, "admit": +0.5, "humour":  0.0, "tempo":  0.0},
+    "hardnose":  {"risk": +0.7, "numbers":  0.0, "admit": +0.3, "humour": +0.5, "tempo": +0.5},
+    "zen":       {"risk": -0.7, "numbers": -0.3, "admit": +0.7, "humour": -0.5, "tempo": -0.7},
+    "quant":     {"risk":  0.0, "numbers": +1.0, "admit": +0.5, "humour": -0.5, "tempo":  0.0},
+    "sarcastic": {"risk":  0.0, "numbers": -0.3, "admit": +0.5, "humour": +1.0, "tempo": +0.3},
+    "nerd":      {"risk": -0.2, "numbers": +0.7, "admit": +0.7, "humour":  0.0, "tempo": -0.3},
+}
+
+
+# Each question is one scenario with 2-4 answers. Each answer carries a
+# vector delta (only non-zero axes listed).
+ONBOARD_QUESTIONS = [
+    {
+        "key": "q1_btc_pump",
+        "prompt": "BTC just pumped 30% in a day. Your first instinct?",
+        "options": [
+            {"label": "Short the breakout — too far, too fast",
+             "deltas": {"risk": +0.7, "admit": +0.2}},
+            {"label": "Wait it out — chase = pain",
+             "deltas": {"risk": -0.7, "tempo": -0.5, "admit": +0.3}},
+            {"label": "Check funding/open-interest first, then decide",
+             "deltas": {"numbers": +0.7, "admit": +0.3}},
+            {"label": "Ride it with a tight stop",
+             "deltas": {"risk": +0.3, "tempo": +0.5}},
+        ],
+    },
+    {
+        "key": "q2_lose_50",
+        "prompt": "You're down -50% on a trade. What do you say to yourself?",
+        "options": [
+            {"label": "Cut. Sized too big. Note the lesson.",
+             "deltas": {"admit": +1.0, "numbers": +0.3}},
+            {"label": "Hold — thesis hasn't changed, the market's wrong",
+             "deltas": {"admit": -0.7, "risk": +0.3}},
+            {"label": "lmao classic me",
+             "deltas": {"humour": +1.0, "admit": +0.5}},
+            {"label": "亏了就亏了，下次注意",
+             "deltas": {"humour": -0.3, "admit": +0.7, "risk": -0.3}},
+        ],
+    },
+    {
+        "key": "q3_explain",
+        "prompt": "When the agent explains a trade to you, you prefer:",
+        "options": [
+            {"label": "Probability X%, EV +$Y, Kelly fraction Z",
+             "deltas": {"numbers": +1.0, "humour": -0.3}},
+            {"label": "A story — what's the catalyst, who's wrong",
+             "deltas": {"numbers": -0.7}},
+            {"label": "Step-by-step: prior, evidence, posterior",
+             "deltas": {"numbers": +0.7, "tempo": -0.3}},
+            {"label": "One sentence, vibes-based",
+             "deltas": {"humour": +0.5, "numbers": -0.5}},
+        ],
+    },
+    {
+        "key": "q4_tone",
+        "prompt": "How should the agent sound when it talks to you?",
+        "options": [
+            {"label": "Serious. Just give me the trade.",
+             "deltas": {"humour": -0.7}},
+            {"label": "Dry humour, roasts bad calls (including its own)",
+             "deltas": {"humour": +1.0}},
+            {"label": "Zen / 佛系，平静",
+             "deltas": {"humour": -0.5, "risk": -0.3, "tempo": -0.5}},
+            {"label": "Sharp + cynical, NYC trader vibes",
+             "deltas": {"humour": +0.5, "risk": +0.5, "tempo": +0.3}},
+        ],
+    },
+    {
+        "key": "q5_size",
+        "prompt": "Default position size on a 65%-confidence trade with $1000?",
+        "options": [
+            {"label": "$5-10 — small, paddle in the water",
+             "deltas": {"risk": -0.7}},
+            {"label": "$25-50 — moderate, want to feel it",
+             "deltas": {"risk": +0.0}},
+            {"label": "$100-200 — go big or go home",
+             "deltas": {"risk": +0.8, "tempo": +0.3}},
+            {"label": "Whatever Kelly says (~$20 here)",
+             "deltas": {"numbers": +0.8, "risk": +0.0}},
+        ],
+    },
+]
+
+
+def _score_preset(user_vec: dict, preset_vec: dict) -> float:
+    """Cosine similarity between user answer vector and preset ideal vector."""
+    keys = set(user_vec) | set(preset_vec)
+    dot = sum(user_vec.get(k, 0) * preset_vec.get(k, 0) for k in keys)
+    nu = sum(user_vec.get(k, 0) ** 2 for k in keys) ** 0.5
+    np = sum(preset_vec.get(k, 0) ** 2 for k in keys) ** 0.5
+    if nu == 0 or np == 0:
+        return 0.0
+    return dot / (nu * np)
+
+
+def _derive_preset(user_vec: dict) -> tuple[str, list[tuple[str, float]]]:
+    """Pick best-matching preset. Return (best_name, ranked_list)."""
+    ranked = sorted(
+        ((name, _score_preset(user_vec, vec)) for name, vec in PRESET_VECTORS.items()),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    return ranked[0][0], ranked
+
+
+def _derive_trade_params(user_vec: dict) -> dict:
+    """Infer suggested trade size / interval / stop / take from the
+    user's risk + tempo axes."""
+    risk = user_vec.get("risk", 0.0)
+    tempo = user_vec.get("tempo", 0.0)
+
+    # trade_size_usd: risk-driven, 1..50 range
+    if risk <= -0.5:
+        size = 1.0
+    elif risk <= 0:
+        size = 5.0
+    elif risk <= 0.4:
+        size = 15.0
+    else:
+        size = 30.0
+
+    # interval: tempo-driven, 60..900 range
+    if tempo <= -0.5:
+        interval = 600
+    elif tempo <= 0:
+        interval = 300
+    elif tempo <= 0.4:
+        interval = 180
+    else:
+        interval = 90
+
+    # stop_loss: tighter when risk is low, looser when high
+    if risk <= -0.5:
+        stop_loss = -0.3
+        take_profit = 0.5
+    elif risk <= 0.4:
+        stop_loss = -0.5
+        take_profit = 1.0
+    else:
+        stop_loss = -0.7
+        take_profit = 2.0
+
+    return {
+        "trade_size_usd": size,
+        "interval_seconds": interval,
+        "stop_loss_pct": stop_loss,
+        "take_profit_pct": take_profit,
+    }
+
+
+def cmd_onboard(args: argparse.Namespace) -> None:
+    """Interactive (or scripted) onboarding — discover trading style by asking
+    scenario questions, not by forcing the user to pick from a preset list.
+
+    Modes:
+      - default: human interactive (stdin)
+      - --json: dump the full questionnaire + preset vectors so a host AI
+        can ask the user in its own voice and then POST results back via
+        --vector
+      - --vector "{...}": skip questions, apply derived style for a given
+        vector (host AI does this after collecting answers)
     """
     # Pre-flight: must have creds (run aime setup first if not)
     if not CREDS_PATH.exists():
@@ -2099,12 +2280,15 @@ def cmd_onboard(args: argparse.Namespace) -> None:
             print(f"\u274c {msg}")
         sys.exit(1)
 
-    presets = list(PERSONALITY_PRESETS.keys())
-    questions = {
-        "personality": {
-            "prompt": "Pick a trading style for your agent.",
-            "options": presets,
-            "descriptions": {
+    # ----- Mode 1: host-AI mode (--json) -----
+    # Return the full questionnaire so the host can ask in its own voice,
+    # then apply via --vector once it has the user's answers.
+    if args.json:
+        emit_json({
+            "ok": True,
+            "questions": ONBOARD_QUESTIONS,
+            "preset_vectors": PRESET_VECTORS,
+            "preset_descriptions": {
                 "default":   "thoughtful prop trader, probabilities + position sizing",
                 "hardnose":  "cynical NYC trader, roasts bad calls, sharp + short",
                 "zen":       "佛系交易员，看准才出手，不上头不 FOMO",
@@ -2112,123 +2296,107 @@ def cmd_onboard(args: argparse.Namespace) -> None:
                 "sarcastic": "dry humour, mocks bad trades (including its own)",
                 "nerd":      "explains priors/posteriors step by step, debugger-style",
             },
-            "default": "default",
-        },
-        "trade_size_usd": {
-            "prompt": "Max $ per autonomous trade?",
-            "default": 1.0,
-            "hint": "Common values: 1 (conservative), 5 (moderate), 25 (aggressive)",
-        },
-        "interval_seconds": {
-            "prompt": "Seconds between autonomous trade attempts?",
-            "default": 300,
-            "hint": "300 = once per 5 min. Faster = 60-120; slower = 600+",
-        },
-        "stop_loss_pct": {
-            "prompt": "Stop-loss threshold (close when value/cost <= 1+this)?",
-            "default": -0.5,
-            "hint": "-0.5 = sell at half. -0.3 tight; -0.7 loose",
-        },
-        "take_profit_pct": {
-            "prompt": "Take-profit threshold (close when value/cost >= 1+this)?",
-            "default": 1.0,
-            "hint": "+1.0 = sell at 2x. +0.5 quick; +2.0 ride winners",
-        },
-        "avoid_categories": {
-            "prompt": "Comma-separated market categories to avoid (or blank)?",
-            "default": "",
-            "hint": "e.g. politics, memecoins, short-resolve-crypto",
-        },
-    }
-
-    if args.json:
-        # Host-AI mode: dump the questionnaire so the host can ask the user
-        emit_json({"ok": True, "questions": questions, "presets": presets})
+            "instructions": (
+                "Ask the user each question in your own voice. For each, "
+                "they pick one option. Sum the deltas of their picks into "
+                "a vector dict, then call: aime onboard --apply-vector "
+                "\'{\"risk\":0.3,...}\' to save the derived style."
+            ),
+        })
         return
 
-    # Interactive: prompt each question
+    # ----- Mode 2: --apply-vector — host AI feeds back the user's vector -----
+    if getattr(args, "apply_vector", None):
+        try:
+            user_vec = json.loads(args.apply_vector)
+        except Exception as e:
+            print(f"\u274c bad --apply-vector JSON: {e}")
+            sys.exit(2)
+        _apply_onboarding_vector(user_vec, also_print=True)
+        return
+
+    # ----- Mode 3: interactive (human at terminal) -----
     print()
-    print("\U0001f6e0\ufe0f  AIME onboarding — pick how your agent should trade")
-    print("   (press enter to accept the default)")
+    print("\U0001f6e0\ufe0f  AIME onboarding — let's find your trading style")
+    print("   I'll ask 5 quick questions. No wrong answers; just pick what")
+    print("   sounds most like you.")
     print()
 
-    answers: dict[str, Any] = {}
+    user_vec: dict[str, float] = {"risk": 0.0, "numbers": 0.0, "admit": 0.0, "humour": 0.0, "tempo": 0.0}
 
-    # personality
-    q = questions["personality"]
-    print(f"\U0001f3ad {q['prompt']}")
-    for name in presets:
-        marker = "  *" if name == q["default"] else "  -"
-        print(f"{marker} {name:9s}  {q['descriptions'][name]}")
-    ans = input(f"\n   choose [{q['default']}]: ").strip() or q["default"]
-    if ans not in presets:
-        print(f"   \u26a0\ufe0f  '{ans}' not in presets, using 'default'")
-        ans = "default"
-    answers["personality"] = ans
-
-    # numeric questions
-    for key in ("trade_size_usd", "interval_seconds", "stop_loss_pct",
-                "take_profit_pct"):
-        q = questions[key]
-        print(f"\n{q['prompt']}")
-        if q.get("hint"):
-            print(f"   ({q['hint']})")
-        raw = input(f"   [{q['default']}]: ").strip()
-        if not raw:
-            answers[key] = q["default"]
-        else:
+    for i, q in enumerate(ONBOARD_QUESTIONS, 1):
+        print(f"\n[{i}/{len(ONBOARD_QUESTIONS)}] {q['prompt']}")
+        for j, opt in enumerate(q["options"], 1):
+            print(f"   {j}. {opt['label']}")
+        while True:
+            raw = input(f"   pick [1-{len(q['options'])}]: ").strip()
             try:
-                answers[key] = type(q["default"])(raw)
+                idx = int(raw) - 1
+                if 0 <= idx < len(q["options"]):
+                    break
             except ValueError:
-                print(f"   \u26a0\ufe0f  couldn\'t parse '{raw}', using default {q['default']}")
-                answers[key] = q["default"]
+                pass
+            print(f"   \u26a0\ufe0f  pick a number 1-{len(q['options'])}")
+        chosen = q["options"][idx]
+        for axis, delta in chosen["deltas"].items():
+            user_vec[axis] = user_vec.get(axis, 0.0) + delta
 
-    # avoid categories
-    q = questions["avoid_categories"]
-    print(f"\n{q['prompt']}")
-    if q.get("hint"):
-        print(f"   ({q['hint']})")
-    raw = input(f"   [{q['default'] or '(none)'}]: ").strip()
-    answers["avoid_categories"] = [s.strip() for s in raw.split(",") if s.strip()]
-
-    # Apply
     print()
-    print("\U0001f4be Saving your choices...")
+    _apply_onboarding_vector(user_vec, also_print=True)
+
+
+def _apply_onboarding_vector(user_vec: dict, *, also_print: bool = False) -> None:
+    """Pick best preset for this user vector, derive trade params, and
+    persist everything (personality.txt + rules tell)."""
+    preset, ranked = _derive_preset(user_vec)
+    params = _derive_trade_params(user_vec)
+
+    if also_print:
+        print("\U0001f9ed Your vector:")
+        for axis, val in user_vec.items():
+            bar = "+" * max(0, int(round(val * 5))) + "-" * max(0, -int(round(val * 5)))
+            print(f"   {axis:8s} {val:+.2f}  {bar}")
+        print()
+        print(f"\U0001f3ad Best-fit style: \u2728 {preset}")
+        for name, score in ranked[1:3]:
+            print(f"   runner-up: {name} ({score:+.2f})")
 
     # 1. personality preset → ~/.aime/personality.txt
-    persona_text = PERSONALITY_PRESETS[answers["personality"]]
+    persona_text = PERSONALITY_PRESETS[preset]
     PERSONALITY_FILE.write_text(persona_text)
-    print(f"   \u2713 personality preset: {answers['personality']}")
+    if also_print:
+        print(f"   \u2713 wrote {PERSONALITY_FILE}")
 
-    # 2. rules → outbox-style tell
-    rule_lines = [
-        f"max trade size ${answers['trade_size_usd']}",
-        f"interval {answers['interval_seconds']}s",
-        f"stop-loss {answers['stop_loss_pct']:+.2f}",
-        f"take-profit {answers['take_profit_pct']:+.2f}",
-    ]
-    if answers["avoid_categories"]:
-        rule_lines.append(f"avoid: {', '.join(answers['avoid_categories'])}")
-    rules_msg = "user trading rules: " + "; ".join(rule_lines)
+    # 2. risk params → tell (long-lived intel daemon uses every decision)
+    rules_msg = (
+        f"user trading style: {preset}; "
+        f"max trade size ${params['trade_size_usd']:.0f}; "
+        f"interval {params['interval_seconds']}s; "
+        f"stop-loss {params['stop_loss_pct']:+.2f}; "
+        f"take-profit {params['take_profit_pct']:+.2f}"
+    )
     try:
-        _chat_call("tell", content=rules_msg, source="onboarding", tags=["rules"])
-        print(f"   \u2713 rules saved (via daemon): {rules_msg}")
+        _chat_call("tell", content=rules_msg, source="onboarding", tags=["rules", "style"])
+        if also_print:
+            print(f"   \u2713 rules saved via daemon")
     except Exception:
         _append_jsonl(INBOX_FILE, {
             "kind": "instruct", "content": rules_msg,
-            "source": "onboarding", "tags": ["rules"],
+            "source": "onboarding", "tags": ["rules", "style"],
         })
-        print(f"   \u2713 rules queued (daemon not running yet): {rules_msg}")
+        if also_print:
+            print(f"   \u2713 rules queued (daemon not running yet)")
 
-    # 3. Suggest next step
-    print()
-    print("\u2705 done. Suggested next step:")
-    print(f"   aime start --no-trade")
-    print(f"     OR (autonomous)")
-    print(f"   aime start --amount {answers['trade_size_usd']} \\")
-    print(f"              --interval {answers['interval_seconds']} \\")
-    print(f"              --stop-loss {answers['stop_loss_pct']} \\")
-    print(f"              --take-profit {answers['take_profit_pct']}")
+    if also_print:
+        print()
+        print(f"\u2705 done. Suggested next:")
+        print(f"   aime start --no-trade                  (manual trading)")
+        print(f"   aime start --amount {params['trade_size_usd']:.0f} \\")
+        print(f"              --interval {params['interval_seconds']} \\")
+        print(f"              --stop-loss {params['stop_loss_pct']:.2f} \\")
+        print(f"              --take-profit {params['take_profit_pct']:.2f}  (autonomous)")
+        print()
+        print(f"   Adjust style anytime:  aime personality set <preset>")
 
 
 def main() -> None:
