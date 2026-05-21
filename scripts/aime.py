@@ -43,7 +43,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.6.0"
+__version__ = "2.6.1"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -1480,6 +1480,10 @@ def build_parser() -> argparse.ArgumentParser:
             "preset + trade params + persists everything"
         ),
     )
+    sp.add_argument(
+        "--force", action="store_true",
+        help="overwrite ~/.aime/personality.txt without backing up the existing one",
+    )
     sp.set_defaults(func=cmd_onboard)
 
     # --- local IPC commands (no backend call, talks to your trading daemon) ---
@@ -2328,7 +2332,10 @@ def cmd_onboard(args: argparse.Namespace) -> None:
         except Exception as e:
             print(f"\u274c bad --apply-vector JSON: {e}")
             sys.exit(2)
-        _apply_onboarding_vector(user_vec, also_print=True)
+        _apply_onboarding_vector(
+            user_vec, also_print=True,
+            force=getattr(args, "force", False),
+        )
         return
 
     # ----- Mode 3: interactive (human at terminal) -----
@@ -2358,12 +2365,25 @@ def cmd_onboard(args: argparse.Namespace) -> None:
             user_vec[axis] = user_vec.get(axis, 0.0) + delta
 
     print()
-    _apply_onboarding_vector(user_vec, also_print=True)
+    _apply_onboarding_vector(
+        user_vec, also_print=True,
+        force=getattr(args, "force", False),
+    )
 
 
-def _apply_onboarding_vector(user_vec: dict, *, also_print: bool = False) -> None:
+def _apply_onboarding_vector(
+    user_vec: dict,
+    *,
+    also_print: bool = False,
+    force: bool = False,
+) -> None:
     """Pick best preset for this user vector, derive trade params, and
-    persist everything (personality.txt + rules tell)."""
+    persist everything (personality.txt + rules tell).
+
+    If personality.txt already exists with non-default content and
+    `force` is False, we back it up to personality.txt.bak-onboard-<ts>
+    before overwriting. Loud about it so the user sees what happened."""
+    import time as _t
     preset, ranked = _derive_preset(user_vec)
     params = _derive_trade_params(user_vec)
 
@@ -2377,11 +2397,23 @@ def _apply_onboarding_vector(user_vec: dict, *, also_print: bool = False) -> Non
         for name, score in ranked[1:3]:
             print(f"   runner-up: {name} ({score:+.2f})")
 
-    # 1. personality preset → ~/.aime/personality.txt
+    # 1. personality preset → ~/.aime/personality.txt (with backup)
     persona_text = PERSONALITY_PRESETS[preset]
+    if PERSONALITY_FILE.exists() and not force:
+        existing = PERSONALITY_FILE.read_text().strip()
+        # Only back up if the existing content is meaningfully different
+        # (not the same preset, not empty)
+        if existing and existing != persona_text.strip():
+            bak = PERSONALITY_FILE.with_name(
+                f"personality.txt.bak-onboard-{int(_t.time())}"
+            )
+            bak.write_text(existing)
+            if also_print:
+                print(f"   \u2139\ufe0f  backed up existing personality to {bak.name}")
+                print(f"      to restore: cp {bak} {PERSONALITY_FILE}")
     PERSONALITY_FILE.write_text(persona_text)
     if also_print:
-        print(f"   \u2713 wrote {PERSONALITY_FILE}")
+        print(f"   \u2713 wrote {PERSONALITY_FILE} (preset: {preset})")
 
     # 2. risk params → tell (long-lived intel daemon uses every decision)
     rules_msg = (
