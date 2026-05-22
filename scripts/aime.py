@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -2152,6 +2153,54 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("reasoning-stats", parents=[json_parent], help="aggregated reasoning bank stats")
     sp.set_defaults(func=cmd_reasoning_stats)
 
+    # ----- reasoning-session (v2.10.0 phase 2: the session loop) -----
+    sp = sub.add_parser(
+        "reasoning-session", parents=[json_parent],
+        help="open / advance / close a reasoning session for a market",
+    )
+    sp.add_argument("market_id", nargs="?", default=None,
+                    help="market UUID; required for starting a new session")
+    mode = sp.add_mutually_exclusive_group()
+    mode.add_argument("--record-agent", action="store_true",
+                      help="Phase 2: record the agent's read")
+    mode.add_argument("--record-user", action="store_true",
+                      help="Phase 3: record the user's read")
+    mode.add_argument("--record-lesson", action="store_true",
+                      help="Phase 4: extract one lesson (call 0+ times)")
+    mode.add_argument("--finalize", action="store_true",
+                      help="Phase 5: close the session")
+    mode.add_argument("--status", action="store_true",
+                      help="show in-progress session state")
+    # Shared fields (each mode uses a subset)
+    sp.add_argument("--reasoning", default=None,
+                    help="reasoning text for --record-agent / --record-user")
+    sp.add_argument("--position", default=None,
+                    help="yes / no / skip for --record-agent / --record-user")
+    sp.add_argument("--confidence", type=float, default=None,
+                    help="0.0-1.0 for --record-agent")
+    sp.add_argument("--signal", default=None, help="--record-lesson")
+    sp.add_argument("--lesson", default=None, help="--record-lesson body")
+    sp.add_argument("--weight", default="medium",
+                    choices=["high", "medium", "low"],
+                    help="--record-lesson weight (default medium)")
+    sp.add_argument("--category", default=None,
+                    help="--record-lesson category (default: market's category)")
+    sp.add_argument("--scope", default=None,
+                    choices=["global", "category"],
+                    help="--record-lesson scope (default: category)")
+    sp.add_argument("--action", default=None,
+                    choices=["trade", "skip"],
+                    help="--finalize action")
+    sp.add_argument("--notes", default="", help="--finalize notes")
+    sp.add_argument("--trade-id", default=None, dest="trade_id",
+                    help="--finalize: trade UUID if --action trade")
+    sp.add_argument("--trigger", default="manual",
+                    choices=["manual", "bootstrap", "new_category",
+                             "low_confidence", "high_stakes", "tell_conflict",
+                             "streak", "postmortem"],
+                    help="trigger source (default manual; bootstrap reserved for phase 3)")
+    sp.set_defaults(func=cmd_reasoning_session)
+
     # ----- reasoning sessions (v2.10.0 phase 1: read-only inspection) -----
     sp = sub.add_parser(
         "reasoning", parents=[json_parent],
@@ -3568,6 +3617,529 @@ def cmd_reasoning(args: argparse.Namespace) -> None:
 
     print(f"\u274c unknown reasoning subcommand: {sub}")
     sys.exit(2)
+
+
+# =========================================================================
+# Reasoning sessions — session loop (v2.10.0 phase 2)
+# =========================================================================
+#
+# `aime reasoning-session <market_id>`  → Phase 1 (setup): start session
+# `aime reasoning-session --record-agent ...` → Phase 2: agent reasoning
+# `aime reasoning-session --record-user ...`  → Phase 3: user reasoning
+# `aime reasoning-session --record-lesson ...` → Phase 4: extract lessons
+# `aime reasoning-session --finalize ...`     → Phase 5: close session
+# `aime reasoning-session --status`           → inspect in-progress
+#
+# In-progress state lives in ~/.aime/reasoning/.in-progress.json with a
+# 30-min TTL. Stale sessions auto-finalize as skip on next CLI call.
+
+
+def _reasoning_now_iso() -> str:
+    from datetime import datetime, timezone
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _reasoning_new_id(prefix: str) -> str:
+    ts = _reasoning_now_iso().replace(":", "").replace("-", "")
+    return f"{prefix}_{ts}_{secrets.token_hex(3)}"
+
+
+def _reasoning_age_seconds(iso_ts: str) -> float | None:
+    from datetime import datetime, timezone
+    try:
+        d = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - d).total_seconds()
+    except Exception:
+        return None
+
+
+def _reasoning_load_inprogress() -> dict | None:
+    """Returns the current in-progress session, or None if no file.
+    If the session is older than the TTL, the returned dict has
+    `_stale: True` so the caller can auto-finalize it."""
+    if not REASONING_INPROGRESS.exists():
+        return None
+    try:
+        data = json.loads(REASONING_INPROGRESS.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+    except Exception:
+        return None
+    age = _reasoning_age_seconds(data.get("started_at", ""))
+    if age is not None and age > REASONING_INPROGRESS_TTL_SEC:
+        data["_stale"] = True
+    return data
+
+
+def _reasoning_save_inprogress(data: dict) -> None:
+    _reasoning_ensure_dir()
+    REASONING_INPROGRESS.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _reasoning_clear_inprogress() -> None:
+    try:
+        REASONING_INPROGRESS.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _reasoning_inprogress_to_session(
+    cur: dict, *, action: str, trade_id: str | None = None, notes: str = ""
+) -> dict:
+    """Convert an in-progress dict into a final session record ready to
+    append to sessions.jsonl."""
+    return {
+        "session_id":       cur.get("session_id"),
+        "started_at":       cur.get("started_at"),
+        "ended_at":         _reasoning_now_iso(),
+        "market_id":        cur.get("market_id"),
+        "market_question": cur.get("market_question"),
+        "market_category": cur.get("market_category"),
+        "trigger":          cur.get("trigger", "manual"),
+        "agent_view":       cur.get("agent_view"),
+        "user_view":        cur.get("user_view"),
+        "lessons_extracted": cur.get("lessons_extracted", []),
+        "final_action":     action,
+        "trade_id":         trade_id,
+        "notes":            notes,
+    }
+
+
+def _reasoning_auto_finalize_stale(stale: dict) -> dict:
+    """Finalize a stale in-progress as skip-by-timeout.
+    Returns the session record (already written to sessions.jsonl)."""
+    stale = {k: v for k, v in stale.items() if k != "_stale"}
+    session = _reasoning_inprogress_to_session(
+        stale,
+        action="skip",
+        notes=f"auto-finalized: session exceeded {REASONING_INPROGRESS_TTL_SEC // 60}min TTL",
+    )
+    _reasoning_append_jsonl(SESSIONS_FILE, session)
+    _reasoning_clear_inprogress()
+    return session
+
+
+def _reasoning_norm_position(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    r = str(raw).strip().lower()
+    if r in ("yes", "y"):  return "yes"
+    if r in ("no", "n"):   return "no"
+    if r in ("skip", "s"): return "skip"
+    return None
+
+
+def _reasoning_session_instructions(market_category: str | None) -> str:
+    """The 5-phase script for the host AI. Returned in the --json brief and
+    printed in human mode so the host knows exactly what to do next."""
+    return (
+        "5-phase session flow — you (the host AI) walk through these:\n\n"
+        "PHASE 1 (done): setup brief. You're reading it now.\n\n"
+        "PHASE 2: agent reasoning. Speak AS the agent using its personality,\n"
+        "  signals, biases, and lessons above. Show the user your read in\n"
+        "  chat (prefix with the pet name and emoji, e.g. '\U0001f43a Akira\n"
+        "  (agent reasoning):'). Then record it:\n"
+        "    aime reasoning-session --record-agent \\\n"
+        "      --reasoning '<one-sentence read>' \\\n"
+        "      --position yes|no|skip --confidence 0.0-1.0\n\n"
+        "PHASE 3: ask the user. Switch back to your own voice (prefix\n"
+        "  '\U0001f464 you (helping):'). Show the agent's read, ask what\n"
+        "  they think and what the agent missed. When they answer:\n"
+        "    aime reasoning-session --record-user \\\n"
+        "      --reasoning '<their reasoning>' --position yes|no|skip\n\n"
+        "PHASE 4: extract lessons. Compare agent_view vs user_view.\n"
+        "  For each meaningful delta, one --record-lesson. Zero is fine,\n"
+        "  don't force it. Each lesson:\n"
+        "    aime reasoning-session --record-lesson \\\n"
+        "      --signal '<short name>' --weight high|medium|low \\\n"
+        "      --lesson '<one sentence>' [--scope global|category]\n\n"
+        "PHASE 5: finalize. The user decides whether to trade.\n"
+        "  If trading: run `aime buy <id> ...` or `aime sell <id> ...`,\n"
+        "  capture the resulting trade id, then finalize.\n"
+        "  Either way close the session:\n"
+        "    aime reasoning-session --finalize \\\n"
+        "      --action trade|skip [--trade-id <id>] [--notes '...']\n\n"
+        "Session times out after 30 min of inactivity (auto-finalize as\n"
+        "skip). Use --status anytime to see where you are."
+    )
+
+
+def _reasoning_session_brief(
+    market: dict, session_id: str, trigger: str
+) -> dict:
+    """Phase 1 setup brief. Pure data — no side effects."""
+    lessons = _reasoning_load_lessons()
+    relevant = _reasoning_pick_lessons(
+        lessons, category=market.get("category"),
+        top=REASONING_LESSONS_INJECT_N,
+    )
+    return {
+        "session_id": session_id,
+        "trigger": trigger,
+        "phase": "open",
+        "market": {
+            "id":         market.get("id"),
+            "question":   market.get("question"),
+            "category":   market.get("category"),
+            "yes_price":  market.get("yes_price"),
+            "no_price":   market.get("no_price"),
+            "end_time":   market.get("end_time"),
+            "resolution_criteria": market.get("resolution_criteria"),
+            "time_to_resolution": _time_to_resolution(market),
+        },
+        "signals_md": _reasoning_load_signals(),
+        "biases_md":  _reasoning_load_biases(),
+        "relevant_lessons": relevant,
+        "instructions": _reasoning_session_instructions(
+            market.get("category")
+        ),
+    }
+
+
+def _reasoning_print_brief(b: dict) -> None:
+    m = b["market"]
+    print(f"\U0001f9ea Session started: {b['session_id']}")
+    print(f"   Trigger: {b['trigger']}")
+    print(f"   Market:  {m.get('question')}")
+    print(f"            ({m.get('id')} / {m.get('category')})")
+    if m.get("yes_price") is not None:
+        print(f"   Prices:  YES {fmt_pct(m['yes_price'])}  NO {fmt_pct(m.get('no_price'))}")
+    if m.get("time_to_resolution"):
+        print(f"   Resolves: {m['time_to_resolution']}")
+    if m.get("resolution_criteria"):
+        print(f"   Criteria: {m['resolution_criteria']}")
+
+    print(f"\n\U0001f4cb Your context")
+    sigs = b["signals_md"].strip().splitlines()
+    print(f"   Signals ({len(sigs)} lines):")
+    for l in sigs[:8]:
+        print(f"     {l}")
+    if len(sigs) > 8:
+        print(f"     ... +{len(sigs)-8} more lines")
+    bias = b["biases_md"].strip().splitlines()
+    print(f"   Biases ({len(bias)} lines):")
+    for l in bias[:6]:
+        print(f"     {l}")
+    rl = b["relevant_lessons"]
+    print(f"   Relevant lessons ({len(rl)}):")
+    for le in rl:
+        wgt = (le.get("weight") or "-")[:4]
+        sig = le.get("signal") or "-"
+        ls = (le.get("lesson") or "")[:80]
+        print(f"     [{wgt:4s}] {sig}: {ls}")
+
+    print("\n" + b["instructions"])
+
+
+# ----- Sub-handlers (each takes args + the loaded in-progress dict) -----
+
+def _rs_start(args, cur: dict | None) -> None:
+    if cur is not None and not cur.get("_stale"):
+        msg = (
+            f"a session is already in progress on market "
+            f"{cur.get('market_id')} (id={cur.get('session_id')}). "
+            f"Run `aime reasoning-session --status`, or finalize it first."
+        )
+        if args.json:
+            emit_json({"ok": False, "error": msg,
+                       "code": "SESSION_ALREADY_OPEN",
+                       "current_session": cur})
+        else:
+            print(f"\u274c {msg}")
+        sys.exit(2)
+
+    # Fetch market
+    market = http("GET", f"/markets/{args.market_id}", json_mode=args.json)
+    if not isinstance(market, dict) or "error" in market:
+        if args.json:
+            emit_json({"ok": False, "error": "market not found",
+                       "raw": market})
+        else:
+            print(f"\u274c market not found: {args.market_id}")
+        sys.exit(2)
+
+    session_id = _reasoning_new_id("sess")
+    started_at = _reasoning_now_iso()
+    trigger = getattr(args, "trigger", "manual") or "manual"
+
+    # Build brief BEFORE writing in-progress so a failure here doesn't
+    # leave a half-open session lying around.
+    brief = _reasoning_session_brief(market, session_id, trigger)
+
+    in_progress = {
+        "session_id":       session_id,
+        "started_at":       started_at,
+        "market_id":        market.get("id"),
+        "market_question": market.get("question"),
+        "market_category": market.get("category"),
+        "trigger":          trigger,
+        "phase":            "open",
+        "agent_view":       None,
+        "user_view":        None,
+        "lessons_extracted": [],
+    }
+    _reasoning_save_inprogress(in_progress)
+
+    if args.json:
+        emit_json({"ok": True, **brief})
+        return
+    _reasoning_print_brief(brief)
+
+
+def _rs_require_inprogress(args, cur: dict | None) -> dict:
+    if cur is None:
+        msg = (
+            "no session in progress. Start one with "
+            "`aime reasoning-session <market_id>` first."
+        )
+        if args.json:
+            emit_json({"ok": False, "error": msg, "code": "NO_SESSION"})
+        else:
+            print(f"\u274c {msg}")
+        sys.exit(2)
+    return cur
+
+
+def _rs_record_agent(args, cur: dict | None) -> None:
+    cur = _rs_require_inprogress(args, cur)
+    pos = _reasoning_norm_position(args.position)
+    if pos is None:
+        _rs_arg_error(args, "--position must be yes / no / skip")
+    if args.reasoning is None or not args.reasoning.strip():
+        _rs_arg_error(args, "--reasoning is required")
+    if args.confidence is None or not (0.0 <= args.confidence <= 1.0):
+        _rs_arg_error(args, "--confidence must be a number in [0, 1]")
+
+    was_overwriting = cur.get("agent_view") is not None
+    cur["agent_view"] = {
+        "position":   pos,
+        "confidence": float(args.confidence),
+        "reasoning":  args.reasoning.strip(),
+        "recorded_at": _reasoning_now_iso(),
+    }
+    cur["phase"] = "agent_recorded"
+    _reasoning_save_inprogress(cur)
+
+    if args.json:
+        emit_json({
+            "ok": True,
+            "session_id": cur["session_id"],
+            "phase": cur["phase"],
+            "agent_view": cur["agent_view"],
+            "overwrote_previous": was_overwriting,
+            "next": "phase 3: ask the user with `--record-user`",
+        })
+        return
+    note = " (overwrote previous)" if was_overwriting else ""
+    print(f"\U0001f43e agent view recorded{note}: {pos} "
+          f"(conf {args.confidence:.2f})")
+    print(f"   next: aime reasoning-session --record-user ...")
+
+
+def _rs_record_user(args, cur: dict | None) -> None:
+    cur = _rs_require_inprogress(args, cur)
+    if cur.get("agent_view") is None:
+        # Allow but warn — host AI may have skipped phase 2 (e.g. the
+        # agent's reasoning failed). Not fatal.
+        if not args.json:
+            print("\u26a0\ufe0f  no agent view recorded yet; "
+                  "recording user view anyway.")
+    pos = _reasoning_norm_position(args.position)
+    if pos is None:
+        _rs_arg_error(args, "--position must be yes / no / skip")
+    if args.reasoning is None or not args.reasoning.strip():
+        _rs_arg_error(args, "--reasoning is required")
+
+    was_overwriting = cur.get("user_view") is not None
+    cur["user_view"] = {
+        "position":  pos,
+        "reasoning": args.reasoning.strip(),
+        "recorded_at": _reasoning_now_iso(),
+    }
+    cur["phase"] = "user_recorded"
+    _reasoning_save_inprogress(cur)
+
+    if args.json:
+        emit_json({
+            "ok": True,
+            "session_id": cur["session_id"],
+            "phase": cur["phase"],
+            "user_view": cur["user_view"],
+            "overwrote_previous": was_overwriting,
+            "next": "phase 4: extract lessons with `--record-lesson` (0+ times), then `--finalize`",
+        })
+        return
+    note = " (overwrote previous)" if was_overwriting else ""
+    print(f"\U0001f464 user view recorded{note}: {pos}")
+    print(f"   next: aime reasoning-session --record-lesson ... "
+          f"(or skip to --finalize)")
+
+
+def _rs_record_lesson(args, cur: dict | None) -> None:
+    cur = _rs_require_inprogress(args, cur)
+    if not args.signal or not args.signal.strip():
+        _rs_arg_error(args, "--signal is required")
+    if not args.lesson or not args.lesson.strip():
+        _rs_arg_error(args, "--lesson is required")
+    weight = (args.weight or "medium").lower()
+    if weight not in ("high", "medium", "low"):
+        _rs_arg_error(args, "--weight must be high / medium / low")
+    scope = args.scope
+    if scope not in ("global", "category", None):
+        _rs_arg_error(args, "--scope must be global or category")
+    if scope is None:
+        scope = "category" if cur.get("market_category") else "global"
+    category = args.category if args.category else cur.get("market_category")
+    if scope == "global":
+        category = None
+
+    now = _reasoning_now_iso()
+    lesson = {
+        "lesson_id":         _reasoning_new_id("lesn"),
+        "created_at":        now,
+        "last_used_at":      None,
+        "source_session_id": cur["session_id"],
+        "category":          category,
+        "scope":             scope,
+        "signal":            args.signal.strip(),
+        "weight":            weight,
+        "lesson":            args.lesson.strip(),
+        "uses":              0,
+        "wins_attributed":   0,
+        "losses_attributed": 0,
+    }
+    _reasoning_append_jsonl(LESSONS_FILE, lesson)
+
+    cur["lessons_extracted"].append(lesson["lesson_id"])
+    cur["phase"] = "lessons_recorded"
+    _reasoning_save_inprogress(cur)
+
+    if args.json:
+        emit_json({
+            "ok": True,
+            "session_id": cur["session_id"],
+            "lesson_id": lesson["lesson_id"],
+            "lesson": lesson,
+            "lessons_extracted_so_far": len(cur["lessons_extracted"]),
+            "next": "more --record-lesson, or --finalize",
+        })
+        return
+    print(f"\U0001f4a1 lesson recorded: {lesson['lesson_id']}")
+    print(f"   signal: {lesson['signal']} ({lesson['weight']})")
+    print(f"   scope:  {lesson['scope']}"
+          + (f" / category={category}" if category else ""))
+    print(f"   total this session: {len(cur['lessons_extracted'])}")
+
+
+def _rs_finalize(args, cur: dict | None) -> None:
+    cur = _rs_require_inprogress(args, cur)
+    action = (args.action or "").lower()
+    if action not in ("trade", "skip"):
+        _rs_arg_error(args, "--action must be 'trade' or 'skip'")
+    notes = args.notes or ""
+    trade_id = getattr(args, "trade_id", None)
+
+    session = _reasoning_inprogress_to_session(
+        cur, action=action, trade_id=trade_id, notes=notes,
+    )
+    _reasoning_append_jsonl(SESSIONS_FILE, session)
+    _reasoning_clear_inprogress()
+
+    if args.json:
+        emit_json({"ok": True, "session": session})
+        return
+    print(f"\u2705 session finalized: {session['session_id']}")
+    print(f"   action: {action}"
+          + (f" (trade {trade_id})" if trade_id else ""))
+    print(f"   lessons extracted: {len(session['lessons_extracted'])}")
+    if notes:
+        print(f"   notes: {notes}")
+
+
+def _rs_status(args, cur: dict | None) -> None:
+    if cur is None:
+        if args.json:
+            emit_json({"ok": True, "in_progress": None})
+        else:
+            print("(no session in progress)")
+        return
+    age = _reasoning_age_seconds(cur.get("started_at", ""))
+    if args.json:
+        emit_json({
+            "ok": True,
+            "in_progress": cur,
+            "age_seconds": age,
+            "stale": bool(cur.get("_stale")),
+            "ttl_seconds": REASONING_INPROGRESS_TTL_SEC,
+        })
+        return
+    print(f"\U0001f9ea {cur['session_id']}")
+    print(f"   market:  {cur.get('market_question')}")
+    print(f"            ({cur.get('market_id')} / {cur.get('market_category')})")
+    print(f"   phase:   {cur.get('phase')}")
+    print(f"   started: {cur.get('started_at')}"
+          + (f"   (age {int(age)}s)" if age else ""))
+    if cur.get("_stale"):
+        print(f"   \u26a0\ufe0f  STALE (>{REASONING_INPROGRESS_TTL_SEC // 60}min) — "
+              f"next CLI call will auto-finalize as skip")
+    av = cur.get("agent_view")
+    uv = cur.get("user_view")
+    print(f"   agent_view: {'set' if av else 'pending'}"
+          + (f" ({av['position']}, conf {av['confidence']:.2f})" if av else ""))
+    print(f"   user_view:  {'set' if uv else 'pending'}"
+          + (f" ({uv['position']})" if uv else ""))
+    print(f"   lessons recorded: {len(cur.get('lessons_extracted', []))}")
+
+
+def _rs_arg_error(args, msg: str) -> "NoReturn":  # type: ignore[name-defined]
+    if args.json:
+        emit_json({"ok": False, "error": msg, "code": "BAD_ARGS"})
+    else:
+        print(f"\u274c {msg}")
+    sys.exit(2)
+
+
+def cmd_reasoning_session(args: argparse.Namespace) -> None:
+    cur = _reasoning_load_inprogress()
+    # Auto-finalize stale before anything else (Q3 design decision).
+    if cur is not None and cur.get("_stale"):
+        finalized = _reasoning_auto_finalize_stale(cur)
+        if not args.json:
+            print(f"\u26a0\ufe0f  auto-finalized stale session "
+                  f"{finalized['session_id']} (timeout) before continuing.")
+        cur = None
+
+    if args.status:
+        return _rs_status(args, cur)
+    if args.record_agent:
+        return _rs_record_agent(args, cur)
+    if args.record_user:
+        return _rs_record_user(args, cur)
+    if args.record_lesson:
+        return _rs_record_lesson(args, cur)
+    if args.finalize:
+        return _rs_finalize(args, cur)
+
+    # Default mode: start a new session (requires market_id positional).
+    if not args.market_id:
+        msg = (
+            "give a market_id to start a new session, or use one of "
+            "--record-agent / --record-user / --record-lesson / --finalize / --status"
+        )
+        if args.json:
+            emit_json({"ok": False, "error": msg, "code": "NO_MARKET_ID"})
+        else:
+            print(f"\u274c {msg}")
+        sys.exit(2)
+    _rs_start(args, cur)
 
 
 def main() -> None:
