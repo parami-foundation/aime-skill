@@ -1,9 +1,10 @@
 # Reasoning Sessions — Design Proposal
 
-**Status:** PROPOSAL (awaiting owner approval)
+**Status:** APPROVED — implementing
 **Target version:** v3.0.0
 **Author:** clawd (小的)
 **Last updated:** 2026-05-22
+**Approved by:** 老大 on 2026-05-22
 
 ## Why this exists
 
@@ -483,42 +484,42 @@ Suggested rollout, smallest deployable units:
 Each phase is independently shippable. v3.0.0-beta alone is already
 useful (manual reasoning sessions); the rest is icing.
 
-## Open questions (before implementation)
+## Resolved decisions (2026-05-22)
 
-1. **Pet personality vs reasoning style** — currently `personality.txt`
-   captures *voice*; this design adds *reasoning style* via
-   `signals.md` + `biases.md`. Are these distinct or should
-   personality.txt absorb the latter?
-   *Proposed:* keep separate. Voice ≠ what to check.
+1. **Pet personality vs reasoning style — KEPT SEPARATE.**
+   `personality.txt` stays about *voice* (how the agent talks).
+   `signals.md` + `biases.md` are about *what to check / what to fix*
+   (how the agent reasons). Two different things, two different files.
 
-2. **Bootstrap mandatory?** Strict gate on `aime start` is opinionated.
-   Should there be `--skip-bootstrap`?
-   *Proposed:* yes, hidden flag for power users. Default UX assumes
-   bootstrap.
+2. **Bootstrap is MANDATORY.** No `--skip-bootstrap` flag. `aime start`
+   (without `--no-trade`) refuses to launch until
+   `bootstrap_completed_at` is set. Manual / `--no-trade` mode is
+   always fine.
 
-3. **Session length** — Phase 2–4 in chat could be slow. Should we
-   timeout at 15 min and auto-finalize as skip?
-   *Proposed:* yes, with `.in-progress.json` ttl=30min and a final
-   `--finalize` defaulting to `action=skip` if missing.
+3. **Session timeout: 30 min.** If `.in-progress.json` is older than
+   30 min and no `--finalize` was called, the session is auto-finalized
+   as `action=skip` on the next CLI invocation, and a fresh session
+   starts next time. Stale half-conversations are not resumed because
+   market state (prices, funding) has moved.
 
-4. **Multi-language signals.md** — owner uses 中文 + English mixed.
-   Should the file be free-form or templated?
-   *Proposed:* free-form markdown. Templates make it feel like a
-   form, defeats the "this is your scratchpad" vibe.
+4. **signals.md / biases.md are FREE-FORM markdown.** No required
+   schema. Owner writes what they want, agent reads with a lenient
+   parser. Mixed 中文/English fine. Treat the files as the owner's
+   scratchpad, not a database table.
 
-5. **Does host AI need a "session script"?** A short instruction
-   block in `aime reasoning-session <id> --json` output to guide
-   the host AI through the 5 phases.
-   *Proposed:* yes, similar to current `onboard --json` instructions
-   field. Without it, host AIs will skip phases.
+5. **`aime reasoning-session <id> --json` returns `instructions`.**
+   A short script telling the host AI "Phase 2: speak as the agent
+   with prefix 🐺 Akira... Phase 3: switch back, ask the user...
+   Phase 4: extract lessons via --record-lesson... Phase 5: finalize."
+   Without this, host AIs will skip phases. Same pattern as
+   `aime onboard --json -> instructions`.
 
----
+## Approval (2026-05-22)
 
-**Decision needed from owner:**
-- [ ] Approve overall shape
-- [ ] Approve artifact schemas
-- [ ] Approve trigger list + cooldowns
-- [ ] Approve out-of-scope list
-- [ ] Resolve open questions (5 items above)
+- [x] Overall shape
+- [x] Artifact schemas
+- [x] Trigger list + cooldowns
+- [x] Out-of-scope list
+- [x] Open questions resolved (above)
 
-Once approved, implementation starts at phase 1 (artifact layer).
+Implementation starts at **phase 1 (artifact layer)**.
