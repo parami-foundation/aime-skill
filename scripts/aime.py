@@ -43,7 +43,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.8.0"
+__version__ = "2.8.1"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -2458,10 +2458,15 @@ def cmd_onboard(args: argparse.Namespace) -> None:
             print(f"\u274c {msg}")
         sys.exit(1)
 
-    # ----- Mode 1: host-AI mode (--json) -----
+    # ----- Mode 1: host-AI mode (--json, no other flags) -----
     # Return the full questionnaire so the host can ask in its own voice,
-    # then apply via --vector once it has the user's answers.
-    if args.json:
+    # then apply via --rank-vector / --pick / --apply-vector once it has
+    # the user's answers.
+    if args.json and not (
+        getattr(args, "rank_vector", None)
+        or getattr(args, "pick", None)
+        or getattr(args, "apply_vector", None)
+    ):
         emit_json({
             "ok": True,
             "questions": ONBOARD_QUESTIONS,
