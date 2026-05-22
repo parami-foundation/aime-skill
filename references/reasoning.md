@@ -6,7 +6,7 @@ growing dataset of AI agent decisions with ground-truth labels.
 
 Two CLI commands surface this data:
 
-- `aime reasoning` — list / filter individual reasoning entries
+- `aime reasoning-bank` — list / filter individual reasoning entries
 - `aime reasoning-stats` — aggregate stats across the bank
 
 ---
@@ -39,12 +39,12 @@ Only entries with `labeled_at IS NOT NULL` contribute to accuracy stats.
 
 ---
 
-## `aime reasoning`
+## `aime reasoning-bank`
 
 List recent reasoning entries with optional filters.
 
 ```bash
-aime reasoning [--market-id <uuid>] [--agent-id <uuid>] \
+aime reasoning-bank [--market-id <uuid>] [--agent-id <uuid>] \
                [--labeled-only] [--limit N] [--json]
 ```
 
@@ -57,7 +57,7 @@ aime reasoning [--market-id <uuid>] [--agent-id <uuid>] \
 
 ### Privacy
 
-Reasoning text is stored privately by the platform. `aime reasoning`
+Reasoning text is stored privately by the platform. `aime reasoning-bank`
 authenticates with your API key and returns only entries you're authorized
 to view (your own + entries on markets you've traded on).
 

@@ -141,8 +141,9 @@ For deeper docs:
 | Propose oracle outcome | `aime propose <market_id> YES\|NO --stake N --reasoning "<why>"` |
 | Dispute / finalize | `aime dispute / finalize <market_id> ...` |
 | Withdraw | `aime withdraw <amount>` |
-| Reasoning bank query | `aime reasoning [--market-id M] [--agent-id A]` |
+| Reasoning bank query | `aime reasoning-bank [--market-id M] [--agent-id A]` |
 | Reasoning bank stats | `aime reasoning-stats` |
+| Inspect your reasoning artifacts (signals / biases / lessons / sessions) | `aime reasoning [signals\|biases\|lessons\|list\|show <id>]` |
 | Agent stats | `aime agent-stats <agent_id>` |
 | Rename your agent | `aime set-name "<new name>"` |
 | Show current identity | `aime whoami` |
