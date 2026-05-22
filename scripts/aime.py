@@ -43,7 +43,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.8.2"
+__version__ = "2.8.3"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -2398,6 +2398,44 @@ def _rank_pets(user_vec: dict) -> list[dict]:
     return scored
 
 
+def _coerce_vector(raw: Any, *, where: str, json_mode: bool) -> dict:
+    """Validate a parsed vector. Host AIs sometimes hand in lists or
+    strings; we want a friendly error, not a traceback. Returns the
+    cleaned dict (numeric values only); exits non-zero on bad input.
+
+    Rules:
+      - must be a JSON object
+      - values must be int or float (bool excluded — it's a subclass of int)
+      - unknown axes are kept (forward-compatible), but non-numeric values
+        are rejected so _score_preset doesn't blow up later
+    """
+    if not isinstance(raw, dict):
+        msg = (
+            f"{where} must be a JSON object like "
+            '\'{"risk":0.5,"numbers":0.3,"admit":0.2,"tempo":0.1}\', '
+            f"got {type(raw).__name__}"
+        )
+        if json_mode:
+            emit_json({"ok": False, "error": msg, "code": "BAD_VECTOR"})
+        else:
+            print(f"\u274c {msg}")
+        sys.exit(2)
+    clean: dict[str, float] = {}
+    for k, v in raw.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            msg = (
+                f"{where}: axis '{k}' must be a number, got "
+                f"{type(v).__name__} ({v!r})"
+            )
+            if json_mode:
+                emit_json({"ok": False, "error": msg, "code": "BAD_VECTOR"})
+            else:
+                print(f"\u274c {msg}")
+            sys.exit(2)
+        clean[k] = float(v)
+    return clean
+
+
 def _save_onboard_state(user_vec: dict) -> None:
     """Cache the user vector between --rank-vector and --pick so that
     --pick can derive trade params from the real answers, not zero."""
@@ -2548,10 +2586,16 @@ def cmd_onboard(args: argparse.Namespace) -> None:
     # shows the ranked list to the user and lets them pick. -----
     if getattr(args, "rank_vector", None):
         try:
-            user_vec = json.loads(args.rank_vector)
+            raw_vec = json.loads(args.rank_vector)
         except Exception as e:
-            print(f"\u274c bad --rank-vector JSON: {e}")
+            if args.json:
+                emit_json({"ok": False, "error": f"bad --rank-vector JSON: {e}",
+                          "code": "BAD_JSON"})
+            else:
+                print(f"\u274c bad --rank-vector JSON: {e}")
             sys.exit(2)
+        user_vec = _coerce_vector(raw_vec, where="--rank-vector",
+                                  json_mode=args.json)
         ranked = _rank_pets(user_vec)
         # Enrich with derived trade params (same vector, same derivation)
         params = _derive_trade_params(user_vec)
@@ -2623,10 +2667,16 @@ def cmd_onboard(args: argparse.Namespace) -> None:
     # skip the ranking display. Useful for non-interactive scripts. -----
     if getattr(args, "apply_vector", None):
         try:
-            user_vec = json.loads(args.apply_vector)
+            raw_vec = json.loads(args.apply_vector)
         except Exception as e:
-            print(f"\u274c bad --apply-vector JSON: {e}")
+            if args.json:
+                emit_json({"ok": False, "error": f"bad --apply-vector JSON: {e}",
+                          "code": "BAD_JSON"})
+            else:
+                print(f"\u274c bad --apply-vector JSON: {e}")
             sys.exit(2)
+        user_vec = _coerce_vector(raw_vec, where="--apply-vector",
+                                  json_mode=args.json)
         _apply_onboarding_vector(
             user_vec, also_print=True,
             force=getattr(args, "force", False),
