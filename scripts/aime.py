@@ -1015,6 +1015,29 @@ DAEMON_LOG = AIME_HOME / "agent.log"
 ONBOARD_STATE_FILE = AIME_HOME / "onboard-state.json"
 ONBOARD_STATE_TTL_SEC = 24 * 3600
 
+# ---------- Reasoning sessions artifact layer (v2.10.0 phase 1) ----------
+# See DESIGN-reasoning-sessions.md for the full design.
+#
+# Directory layout under AIME_HOME:
+#   reasoning/
+#     signals.md       free-form markdown, what the owner cares about
+#     biases.md        free-form markdown, agent's known biases
+#     lessons.jsonl    structured lessons (decide_trade reads top N)
+#     sessions.jsonl   immutable audit log of every session
+#     state.json       pause flag, cooldowns, bootstrap_completed_at
+#     .in-progress.json  current open session (ttl 30 min)
+REASONING_DIR        = AIME_HOME / "reasoning"
+SIGNALS_FILE         = REASONING_DIR / "signals.md"
+BIASES_FILE          = REASONING_DIR / "biases.md"
+LESSONS_FILE         = REASONING_DIR / "lessons.jsonl"
+SESSIONS_FILE        = REASONING_DIR / "sessions.jsonl"
+REASONING_STATE_FILE = REASONING_DIR / "state.json"
+REASONING_INPROGRESS = REASONING_DIR / ".in-progress.json"
+REASONING_INPROGRESS_TTL_SEC = 30 * 60     # 30 min, design decision Q3
+REASONING_LESSONS_CAP        = 100         # design: compaction cap
+REASONING_LESSONS_INJECT_N   = 10          # decide_trade top-N
+REASONING_STATE_SCHEMA       = 1
+
 CHAT_HOST = os.environ.get("AIME_CHAT_HOST", "127.0.0.1")
 CHAT_PORT = int(os.environ.get("AIME_CHAT_PORT", "7777"))
 
@@ -2114,7 +2137,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("market_id", help="market id")
     sp.set_defaults(func=cmd_oracle_proposal)
 
-    sp = sub.add_parser("reasoning", parents=[json_parent], help="list reasoning-bank entries (AIME's reasoning data)")
+    # NOTE: `aime reasoning` is now a subcommand group for reasoning
+    # SESSIONS (the local owner↔agent dialogue artifacts). The old
+    # "reasoning bank" listing has moved to `aime reasoning-bank`.
+    sp = sub.add_parser(
+        "reasoning-bank", parents=[json_parent],
+        help="list reasoning-bank entries (AIME's public reasoning data)",
+    )
     sp.add_argument("--market-id", default=None, help="filter by market")
     sp.add_argument("--agent-id", default=None, help="filter by agent")
     sp.add_argument("--limit", type=int, default=20)
@@ -2122,6 +2151,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("reasoning-stats", parents=[json_parent], help="aggregated reasoning bank stats")
     sp.set_defaults(func=cmd_reasoning_stats)
+
+    # ----- reasoning sessions (v2.10.0 phase 1: read-only inspection) -----
+    sp = sub.add_parser(
+        "reasoning", parents=[json_parent],
+        help="reasoning-session artifacts (signals, biases, lessons, sessions)",
+    )
+    rsub = sp.add_subparsers(dest="reasoning_action")
+    rsub.add_parser("signals", parents=[json_parent],
+                    help="show signals.md (what the owner cares about)")
+    rsub.add_parser("biases", parents=[json_parent],
+                    help="show biases.md (the agent's known biases)")
+    p_les = rsub.add_parser("lessons", parents=[json_parent],
+                            help="list lessons (decide_trade injects top-N)")
+    p_les.add_argument("--top", type=int, default=20)
+    p_les.add_argument("--category", default=None)
+    p_les.add_argument("--scope", choices=["global", "category"], default=None)
+    p_lst = rsub.add_parser("list", parents=[json_parent],
+                            help="list past reasoning sessions")
+    p_lst.add_argument("--limit", type=int, default=10)
+    p_show = rsub.add_parser("show", parents=[json_parent],
+                             help="show one reasoning session by id")
+    p_show.add_argument("session_id")
+    sp.set_defaults(func=cmd_reasoning, reasoning_action=None)
 
     sp = sub.add_parser("agent-stats", parents=[json_parent], help="stats for a specific agent")
     sp.add_argument("agent_id", help="agent UUID")
@@ -3177,6 +3229,345 @@ def _apply_onboarding_vector(
         print(f"              --take-profit {params['take_profit_pct']:.2f}  (autonomous)")
         print()
         print(f"   Adjust style anytime:  aime personality set <preset>")
+
+
+# =========================================================================
+# Reasoning sessions — artifact layer (v2.10.0 phase 1: read-only)
+# =========================================================================
+#
+# This is the persistent state shared between the owner and the agent,
+# built up by reasoning sessions (Layer 1 onboarding + Layer 2 ongoing
+# triggers). See DESIGN-reasoning-sessions.md for the full design.
+#
+# Phase 1 ships *only* the artifact layer + read-only inspection. No
+# session loop yet. The schemas here are the contract that phase 2
+# (session loop) and phase 4 (decide_trade integration) will consume.
+
+_DEFAULT_SIGNALS_MD = (
+    "# Signals my owner cares about\n"
+    "\n"
+    "*(Empty — populated by reasoning sessions. Hand-edit anytime; the\n"
+    "agent reads this whole file as free-form markdown.)*\n"
+)
+
+_DEFAULT_BIASES_MD = (
+    "# Biases I've been corrected on\n"
+    "\n"
+    "*(Empty — populated as the owner catches me making the same\n"
+    "mistake. Hand-edit anytime.)*\n"
+)
+
+_DEFAULT_REASONING_STATE = {
+    "schema_version": REASONING_STATE_SCHEMA,
+    "paused_until": None,
+    "trigger_cooldowns": {},
+    "global_last_trigger_at": None,
+    "settings": {
+        "min_hours_between_triggers": 6,
+        "trigger_dedup_hours": 24,
+        "lessons_inject_top_n": REASONING_LESSONS_INJECT_N,
+        "high_stakes_pct": 0.10,
+    },
+    "bootstrap_completed_at": None,
+}
+
+
+def _reasoning_ensure_dir() -> None:
+    REASONING_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _reasoning_load_signals() -> str:
+    if not SIGNALS_FILE.exists():
+        return _DEFAULT_SIGNALS_MD
+    return SIGNALS_FILE.read_text(encoding="utf-8")
+
+
+def _reasoning_save_signals(text: str) -> None:
+    _reasoning_ensure_dir()
+    SIGNALS_FILE.write_text(text, encoding="utf-8")
+
+
+def _reasoning_load_biases() -> str:
+    if not BIASES_FILE.exists():
+        return _DEFAULT_BIASES_MD
+    return BIASES_FILE.read_text(encoding="utf-8")
+
+
+def _reasoning_save_biases(text: str) -> None:
+    _reasoning_ensure_dir()
+    BIASES_FILE.write_text(text, encoding="utf-8")
+
+
+def _reasoning_load_jsonl(path: Path) -> list[dict]:
+    """Lenient JSONL reader: skips blank / malformed lines instead of
+    blowing up on a corrupt entry. Returns rows in file order."""
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                rows.append(obj)
+        except Exception:
+            continue
+    return rows
+
+
+def _reasoning_append_jsonl(path: Path, obj: dict) -> None:
+    _reasoning_ensure_dir()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _reasoning_rewrite_jsonl(path: Path, rows: list[dict]) -> None:
+    """Used by compaction (phase 4). Writes the whole file atomically."""
+    _reasoning_ensure_dir()
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+
+
+def _reasoning_load_lessons() -> list[dict]:
+    return _reasoning_load_jsonl(LESSONS_FILE)
+
+
+def _reasoning_load_sessions() -> list[dict]:
+    return _reasoning_load_jsonl(SESSIONS_FILE)
+
+
+def _reasoning_load_state() -> dict:
+    if not REASONING_STATE_FILE.exists():
+        return json.loads(json.dumps(_DEFAULT_REASONING_STATE))   # deep copy
+    try:
+        data = json.loads(REASONING_STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("state.json is not an object")
+        # Merge missing fields from defaults so newer code doesn't crash
+        # on older files.
+        for k, v in _DEFAULT_REASONING_STATE.items():
+            if k not in data:
+                data[k] = v if not isinstance(v, dict) else dict(v)
+        # Settings merge (nested)
+        for k, v in _DEFAULT_REASONING_STATE["settings"].items():
+            data["settings"].setdefault(k, v)
+        return data
+    except Exception:
+        return json.loads(json.dumps(_DEFAULT_REASONING_STATE))
+
+
+def _reasoning_save_state(state: dict) -> None:
+    _reasoning_ensure_dir()
+    REASONING_STATE_FILE.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _reasoning_pick_lessons(
+    lessons: list[dict],
+    *,
+    category: str | None = None,
+    scope: str | None = None,
+    top: int = REASONING_LESSONS_INJECT_N,
+) -> list[dict]:
+    """Filter + rank lessons. Used by `aime reasoning lessons` and (later)
+    by decide_trade prompt injection.
+
+    Ranking (high to low priority):
+      1. matching category first
+      2. then scope == global
+      3. then more recent (last_used_at then created_at)
+    """
+    def _key(le: dict) -> tuple:
+        cat_match = 1 if (category and le.get("category") == category) else 0
+        scope_match = 1 if le.get("scope") == "global" else 0
+        ts = le.get("last_used_at") or le.get("created_at") or ""
+        return (cat_match, scope_match, ts)
+
+    pool = lessons
+    if scope:
+        pool = [le for le in pool if le.get("scope") == scope]
+    if category:
+        # Don't *filter* by category; we rank with it. But if a strict
+        # category filter is requested via --category, callers expect
+        # that behaviour. Keep both behaviors by giving callers --scope
+        # to narrow; --category alone is just a ranking hint.
+        pass
+    pool = sorted(pool, key=_key, reverse=True)
+    return pool[:top]
+
+
+# ----- Read-only CLI command (phase 1) -----
+
+def cmd_reasoning(args: argparse.Namespace) -> None:
+    sub = getattr(args, "reasoning_action", None)
+
+    if sub is None:
+        # No subcommand — print a short overview pointing at the subs.
+        msg = (
+            "aime reasoning — owner↔agent reasoning artifacts\n\n"
+            "  signals          show signals.md (what your owner cares about)\n"
+            "  biases           show biases.md (your known biases)\n"
+            "  lessons [--top N --category C --scope S]\n"
+            "                   list lessons (decide_trade injects top N)\n"
+            "  list [--limit N] past reasoning sessions\n"
+            "  show <session_id>\n"
+            "                   detail for one session\n\n"
+            "More to come in v2.10.0 betas: reasoning-session, pause, compact.\n"
+            "Design: DESIGN-reasoning-sessions.md in the repo.\n"
+        )
+        if args.json:
+            emit_json({
+                "ok": True,
+                "available_subcommands": [
+                    "signals", "biases", "lessons", "list", "show",
+                ],
+                "phase": "1 (artifact layer, read-only)",
+                "design_doc": "DESIGN-reasoning-sessions.md",
+            })
+        else:
+            print(msg)
+        return
+
+    if sub == "signals":
+        text = _reasoning_load_signals()
+        if args.json:
+            emit_json({
+                "ok": True,
+                "path": str(SIGNALS_FILE),
+                "exists": SIGNALS_FILE.exists(),
+                "text": text,
+            })
+            return
+        print(f"# {SIGNALS_FILE}"
+              f"{'' if SIGNALS_FILE.exists() else ' (not yet written, showing default)'}\n")
+        print(text.rstrip())
+        return
+
+    if sub == "biases":
+        text = _reasoning_load_biases()
+        if args.json:
+            emit_json({
+                "ok": True,
+                "path": str(BIASES_FILE),
+                "exists": BIASES_FILE.exists(),
+                "text": text,
+            })
+            return
+        print(f"# {BIASES_FILE}"
+              f"{'' if BIASES_FILE.exists() else ' (not yet written, showing default)'}\n")
+        print(text.rstrip())
+        return
+
+    if sub == "lessons":
+        lessons = _reasoning_load_lessons()
+        category = getattr(args, "category", None)
+        scope = getattr(args, "scope", None)
+        top = getattr(args, "top", 20) or 20
+        picked = _reasoning_pick_lessons(
+            lessons, category=category, scope=scope, top=top,
+        )
+        if args.json:
+            emit_json({
+                "ok": True,
+                "count": len(picked),
+                "total": len(lessons),
+                "filters": {"category": category, "scope": scope, "top": top},
+                "lessons": picked,
+            })
+            return
+        if not lessons:
+            print("(no lessons yet — run reasoning sessions to record some)")
+            return
+        print(f"\U0001f4d6 {len(picked)} lessons "
+              f"(of {len(lessons)} total)"
+              + (f", category={category}" if category else "")
+              + (f", scope={scope}" if scope else ""))
+        for le in picked:
+            wgt = (le.get("weight") or "-")[:4]
+            sig = le.get("signal") or "-"
+            cat = le.get("category") or le.get("scope") or "-"
+            uses = le.get("uses", 0)
+            wins = le.get("wins_attributed", 0)
+            loss = le.get("losses_attributed", 0)
+            print(f"\n  [{wgt:4s}] {sig}  ({cat}, used {uses}× — "
+                  f"{wins}W/{loss}L)")
+            print(f"        {le.get('lesson', '')}")
+        return
+
+    if sub == "list":
+        sessions = _reasoning_load_sessions()
+        limit = getattr(args, "limit", 10) or 10
+        recent = sessions[-limit:][::-1]   # newest first
+        if args.json:
+            emit_json({
+                "ok": True,
+                "count": len(recent),
+                "total": len(sessions),
+                "sessions": recent,
+            })
+            return
+        if not sessions:
+            print("(no sessions yet)")
+            return
+        print(f"\U0001f4dc {len(recent)} recent sessions (of {len(sessions)} total)")
+        for s in recent:
+            print(f"\n  {s.get('session_id', '?')}")
+            print(f"     {s.get('started_at', '?')}  trigger: {s.get('trigger', '?')}")
+            q = (s.get("market_question") or "")[:70]
+            print(f"     market: {q}")
+            print(f"     final:  {s.get('final_action', '?')}")
+        return
+
+    if sub == "show":
+        sid = getattr(args, "session_id", None)
+        if not sid:
+            print("\u274c session_id required")
+            sys.exit(2)
+        sessions = _reasoning_load_sessions()
+        match = next((s for s in sessions if s.get("session_id") == sid), None)
+        if not match:
+            if args.json:
+                emit_json({"ok": False, "error": f"session {sid} not found"})
+            else:
+                print(f"\u274c session not found: {sid}")
+            sys.exit(2)
+        if args.json:
+            emit_json({"ok": True, "session": match})
+            return
+        print(f"\U0001f4dc {match.get('session_id')}")
+        print(f"   started:  {match.get('started_at')}")
+        print(f"   ended:    {match.get('ended_at')}")
+        print(f"   trigger:  {match.get('trigger')}")
+        print(f"   market:   {match.get('market_question')}")
+        print(f"             ({match.get('market_id')} / {match.get('market_category')})")
+        av = match.get("agent_view") or {}
+        uv = match.get("user_view") or {}
+        print(f"\n   \U0001f43e agent view")
+        print(f"     position:    {av.get('position', '?')}")
+        print(f"     confidence:  {av.get('confidence', '?')}")
+        print(f"     reasoning:   {av.get('reasoning', '')}")
+        print(f"\n   \U0001f464 user view")
+        print(f"     position:    {uv.get('position', '?')}")
+        print(f"     reasoning:   {uv.get('reasoning', '')}")
+        lex = match.get("lessons_extracted") or []
+        print(f"\n   \U0001f4a1 lessons extracted: {len(lex)}"
+              + (f" ({', '.join(lex)})" if lex else ""))
+        print(f"\n   final:    {match.get('final_action')}")
+        if match.get("trade_id"):
+            print(f"   trade:    {match['trade_id']}")
+        if match.get("notes"):
+            print(f"\n   notes:    {match['notes']}")
+        return
+
+    print(f"\u274c unknown reasoning subcommand: {sub}")
+    sys.exit(2)
 
 
 def main() -> None:
