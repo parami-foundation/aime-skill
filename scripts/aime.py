@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -43,7 +44,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.8.3"
+__version__ = "2.9.0"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -461,6 +462,327 @@ def cmd_market(args: argparse.Namespace) -> None:
         print(f"\n   Description:\n   {resp['description']}")
     if resp.get("resolution_criteria"):
         print(f"\n   Resolution:\n   {resp['resolution_criteria']}")
+
+
+# ---------- Research brief ----------
+#
+# `aime research <market_id>` is a *scaffolding* command for host AIs.
+# It does NOT fetch third-party data itself (no hardcoded API integrations
+# that go stale). Instead it inspects the market and tells the host AI:
+#   - what kind of market this is (playbook)
+#   - what to search for (templated with the ticker / topic)
+#   - what edge math looks like for this market (implied probability,
+#     time-to-resolution, needed move)
+#   - what to do after research (decision template)
+#
+# Host AIs already have their own search/fetch tools; we just hand them
+# a structured brief so they don't have to invent the workflow.
+
+# Known crypto tickers we'll try to extract from market text. Keep this
+# tight — over-matching produces noisy queries. Add as new markets surface.
+_KNOWN_TICKERS = frozenset({
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "MATIC",
+    "LINK", "UNI", "LTC", "SHIB", "TRX", "DOT", "TON", "PEPE", "APT",
+    "ARB", "OP", "INJ", "TIA", "SUI", "SEI", "HBAR", "ATOM", "NEAR",
+    "FIL", "ICP", "AAVE", "CRV", "MKR", "COMP", "SUSHI", "LDO", "GMX",
+    "WLD", "JUP", "PYTH", "WIF", "BONK", "FLOKI", "BLUR", "ENS",
+})
+
+
+def _extract_tickers(market: dict) -> list[str]:
+    """Pull known crypto tickers out of a market's text (question +
+    description + resolution_criteria). Returns unique-preserved order."""
+    text = " ".join(str(market.get(k, "") or "") for k in
+                    ("question", "description", "resolution_criteria"))
+    found = re.findall(r"\b([A-Z]{2,6})\b", text)
+    seen: dict[str, None] = {}
+    for sym in found:
+        if sym in _KNOWN_TICKERS and sym not in seen:
+            seen[sym] = None
+    return list(seen)
+
+
+def _parse_price_target(market: dict) -> dict | None:
+    """For crypto-price-Xh markets, the description / resolution_criteria
+    usually contains 'Current ETH: $2,124.60. Target: $2,103.35 (-1.0%)'.
+    Pull those numbers so we can compute the needed move."""
+    text = f"{market.get('description','')} {market.get('resolution_criteria','')}"
+    cur = re.search(r"[Cc]urrent[^$]*\$([\d,]+\.?\d*)", text)
+    tgt = re.search(r"[Tt]arget[^$]*\$([\d,]+\.?\d*)", text)
+    if not (cur and tgt):
+        return None
+    try:
+        cur_v = float(cur.group(1).replace(",", ""))
+        tgt_v = float(tgt.group(1).replace(",", ""))
+        if cur_v == 0:
+            return None
+        move_pct = (tgt_v - cur_v) / cur_v * 100
+        return {"current": cur_v, "target": tgt_v, "move_pct": move_pct}
+    except Exception:
+        return None
+
+
+def _time_to_resolution(market: dict) -> str | None:
+    """Pretty 'in 2h 15m' or 'in 3d' until end_time. Returns None if no
+    end_time or it's in the past."""
+    from datetime import datetime, timezone
+    raw = market.get("end_time") or market.get("resolves_at")
+    if not raw:
+        return None
+    try:
+        # Handle 'Z' suffix
+        end = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        delta = end - datetime.now(timezone.utc)
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            return "expired"
+        if secs < 3600:
+            return f"in {secs // 60}m"
+        if secs < 86400:
+            return f"in {secs // 3600}h {(secs % 3600) // 60}m"
+        return f"in {secs // 86400}d {(secs % 86400) // 3600}h"
+    except Exception:
+        return None
+
+
+# Playbooks are matched in order; first match wins. Each one supplies
+# the data sources + search queries + edge analysis hints for a market
+# category. Templates use {ticker} which gets replaced with the first
+# extracted ticker (or 'the asset' as a fallback).
+RESEARCH_PLAYBOOKS = [
+    {
+        "label": "crypto short-term price",
+        "match": lambda c: c.startswith("crypto-price-"),
+        "sources": [
+            "CoinGecko (resolution source — use the exact pair in resolution_criteria)",
+            "TradingView / Binance chart for 1m–5m bars near resolution time",
+            "Funding rate + open interest (Coinglass) — extreme funding often precedes flush",
+        ],
+        "queries": [
+            'web_search "{ticker} price now CoinGecko"',
+            'web_search "{ticker} 1h chart momentum"',
+            'web_search "{ticker} funding rate today"',
+            'bird search "{ticker}"   # Twitter sentiment around the level',
+        ],
+        "edge_hints": [
+            "Short-window markets are mostly noise — only trade when the level is",
+            "near a key technical (round number, prior swing high/low) AND",
+            "momentum disagrees with the price (e.g. market priced 60% for a drop",
+            "but funding is heavily long and asset is consolidating).",
+            "Mean reversion vs trend continuation — pick one and size small.",
+        ],
+    },
+    {
+        "label": "on-chain activity / DeFi metrics",
+        "match": lambda c: c in ("on-chain-activity", "defi-tvl", "defi-volume",
+                                 "defi-staking", "DeFi"),
+        "sources": [
+            "DefiLlama (TVL, fees, volume by chain/protocol)",
+            "Dune Analytics (custom on-chain queries, often the source of truth)",
+            "Project's own dashboard / token terminal",
+        ],
+        "queries": [
+            'web_search "{ticker} TVL DefiLlama"',
+            'web_search "{ticker} 7d volume"',
+            'WebFetch https://defillama.com/protocol/{ticker_lower}',
+        ],
+        "edge_hints": [
+            "Resolution usually checks a specific metric on a specific date —",
+            "read resolution_criteria carefully (which dashboard, what time).",
+            "On-chain metrics are noisier than people think; sample variance is",
+            "high. If the current value is within ±10% of the threshold, fade",
+            "the obvious side — the market overweights recent direction.",
+        ],
+    },
+    {
+        "label": "crypto event / launch / listing",
+        "match": lambda c: c in ("crypto-event", "Crypto"),
+        "sources": [
+            "Project's official Twitter / Discord / blog (THE primary source)",
+            "The Block / CoinDesk for confirmation",
+            "On-chain proof if applicable (contract deployment, etc.)",
+        ],
+        "queries": [
+            'bird search "{ticker} launch"',
+            'web_search "{ticker} news today"',
+            'WebFetch <project official site / blog>',
+        ],
+        "edge_hints": [
+            "Event markets resolve on facts, not vibes. If the official source",
+            "hasn't confirmed yet, both sides are gambling on timing.",
+            "Look for: hard commitments (dates in official posts), shipped code,",
+            "regulatory dependencies, prior delay patterns.",
+        ],
+    },
+    {
+        "label": "AI / tech event",
+        "match": lambda c: c in ("AI", "tech-event", "Tech"),
+        "sources": [
+            "Company official blog / press release",
+            "HackerNews + r/MachineLearning for early signal",
+            "Twitter (specific researchers / labs)",
+        ],
+        "queries": [
+            'web_search "<topic> announcement"',
+            'WebFetch <company blog>',
+            'bird search "<topic>"',
+        ],
+        "edge_hints": [
+            "AI markets often resolve on benchmarks or product launches — read",
+            "resolution_criteria for the exact metric.",
+            "Hype windows are short. Time-to-resolution matters more than",
+            "current narrative strength.",
+        ],
+    },
+]
+
+
+# Generic fallback when no playbook matches the category.
+_GENERIC_PLAYBOOK = {
+    "label": "generic",
+    "sources": [
+        "web_search for recent news on the topic",
+        "Read the resolution_criteria carefully — it names the data source",
+        "Look for prior similar markets (use `aime markets --category <c>`)",
+    ],
+    "queries": [
+        'web_search "<key topic from question>"',
+        'WebFetch <resolution source URL if any>',
+    ],
+    "edge_hints": [
+        "If you can't articulate a specific edge in one sentence, skip.",
+        "Time-to-resolution and current price together imply the market's",
+        "implied probability — ask: would I take the other side at this price?",
+    ],
+}
+
+
+def _pick_playbook(market: dict) -> dict:
+    cat = (market.get("category") or "").strip()
+    for pb in RESEARCH_PLAYBOOKS:
+        try:
+            if pb["match"](cat):
+                return pb
+        except Exception:
+            continue
+    return _GENERIC_PLAYBOOK
+
+
+def _format_queries(playbook: dict, tickers: list[str]) -> list[str]:
+    ticker = tickers[0] if tickers else "the asset"
+    out = []
+    for q in playbook["queries"]:
+        out.append(
+            q.replace("{ticker_lower}", ticker.lower())
+             .replace("{ticker}", ticker)
+        )
+    return out
+
+
+def _build_research_brief(market: dict) -> dict:
+    """Assemble the structured research brief for a market. Returns dict
+    that can be JSON-dumped or pretty-printed."""
+    pb = _pick_playbook(market)
+    tickers = _extract_tickers(market)
+    yes = market.get("yes_price")
+    no = market.get("no_price")
+    implied_yes = None
+    if isinstance(yes, (int, float)) and 0 < yes < 1:
+        implied_yes = round(yes * 100, 1)
+    target = _parse_price_target(market)
+    ttr = _time_to_resolution(market)
+
+    edge = {
+        "yes_price": yes,
+        "no_price": no,
+        "implied_yes_pct": implied_yes,
+        "time_to_resolution": ttr,
+        "price_target": target,
+    }
+
+    return {
+        "market_id": market.get("id"),
+        "question": market.get("question"),
+        "category": market.get("category"),
+        "playbook": pb["label"],
+        "tickers_detected": tickers,
+        "resolution_criteria": market.get("resolution_criteria"),
+        "data_sources": pb["sources"],
+        "suggested_queries": _format_queries(pb, tickers),
+        "edge_analysis": edge,
+        "edge_hints": pb["edge_hints"],
+        "decision_template": [
+            f"aime buy {market.get('id')} YES <amount> \"<one-sentence reasoning>\"",
+            f"aime buy {market.get('id')} NO  <amount> \"<one-sentence reasoning>\"",
+            "or skip silently if no edge after research",
+        ],
+    }
+
+
+def _print_research_brief(b: dict) -> None:
+    print(f"\U0001f50d {b['question']}")
+    print(f"   ID:       {b['market_id']}")
+    print(f"   Category: {b['category']}  → playbook: {b['playbook']}")
+    if b["tickers_detected"]:
+        print(f"   Tickers:  {', '.join(b['tickers_detected'])}")
+    if b.get("resolution_criteria"):
+        print(f"   Resolves: {b['resolution_criteria']}")
+
+    edge = b["edge_analysis"]
+    print(f"\n\U0001f4ca Edge snapshot")
+    if edge["yes_price"] is not None:
+        print(f"   YES price:  {fmt_pct(edge['yes_price'])}"
+              + (f"   (market implies {edge['implied_yes_pct']}% YES)"
+                 if edge['implied_yes_pct'] is not None else ""))
+    if edge["no_price"] is not None:
+        print(f"   NO price:   {fmt_pct(edge['no_price'])}")
+    if edge["time_to_resolution"]:
+        print(f"   Resolves:   {edge['time_to_resolution']}")
+    tgt = edge.get("price_target")
+    if tgt:
+        sign = "+" if tgt["move_pct"] >= 0 else ""
+        print(f"   Move req:   current ${tgt['current']:,.2f} → "
+              f"target ${tgt['target']:,.2f} ({sign}{tgt['move_pct']:.2f}%)")
+
+    print(f"\n\U0001f4da Data sources to use (with your own tools)")
+    for s in b["data_sources"]:
+        print(f"   • {s}")
+
+    print(f"\n\U0001f9ed Suggested queries (templates — swap topic if needed)")
+    for q in b["suggested_queries"]:
+        print(f"   $ {q}")
+
+    print(f"\n\U0001f4a1 Edge hints")
+    for h in b["edge_hints"]:
+        print(f"   • {h}")
+
+    print(f"\n\u27a1\ufe0f  After research, decide:")
+    for cmd in b["decision_template"]:
+        print(f"   {cmd}")
+
+
+def cmd_research(args: argparse.Namespace) -> None:
+    resp = http("GET", f"/markets/{args.market_id}", json_mode=args.json)
+    if not isinstance(resp, dict):
+        if args.json:
+            emit_json({"ok": False, "error": "market not found",
+                       "raw": resp})
+        else:
+            print(resp)
+        return
+    if "error" in resp:
+        if args.json:
+            emit_json(resp)
+        else:
+            print(f"\u274c {resp.get('error')}")
+        return
+    brief = _build_research_brief(resp)
+    if args.json:
+        emit_json({"ok": True, **brief})
+        return
+    _print_research_brief(brief)
 
 
 def _trade(args: argparse.Namespace, *, sell: bool) -> None:
@@ -1540,6 +1862,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("market", parents=[json_parent], help="get one market by id")
     sp.add_argument("market_id")
     sp.set_defaults(func=cmd_market)
+
+    sp = sub.add_parser(
+        "research", parents=[json_parent],
+        help="research brief for a market: data sources, suggested searches, edge math",
+    )
+    sp.add_argument("market_id")
+    sp.set_defaults(func=cmd_research)
 
     sp = sub.add_parser(
         "buy", parents=[json_parent],
