@@ -1,7 +1,7 @@
 # Reasoning Sessions — Design Proposal
 
 **Status:** APPROVED — implementing
-**Target version:** v3.0.0
+**Target version:** v2.10.0
 **Author:** clawd (小的)
 **Last updated:** 2026-05-22
 **Approved by:** 老大 on 2026-05-22
@@ -441,7 +441,7 @@ Steps:
 | Multi-agent setup (same machine, multiple agents) | `AIME_HOME` already namespaces everything; one reasoning/ dir per agent. No change needed |
 | Schema evolves and breaks old sessions | `schema_version` in `state.json`; reader is lenient (unknown fields ignored), writer always uses current schema |
 
-## Explicitly out of scope (v3.0)
+## Explicitly out of scope (v2.10)
 
 - **No** automatic third-party data fetching in CLI (host AI still does
   `web_search` itself). `aime research` already covers this surface.
@@ -457,31 +457,31 @@ Steps:
 
 Suggested rollout, smallest deployable units:
 
-1. **v3.0.0-alpha**: Artifact layer
+1. **v2.10.0-alpha**: Artifact layer
    - `~/.aime/reasoning/` directory + read/write helpers
    - `aime reasoning signals|biases|lessons|list|show` (read-only)
    - No session-running yet; tests writing to artifacts manually
 
-2. **v3.0.0-beta**: Single session loop
+2. **v2.10.0-beta**: Single session loop
    - `aime reasoning-session <id>` Phases 1–5
    - Phase hooks (`--record-agent`, `--record-user`, `--record-lesson`,
      `--finalize`)
    - In-progress state file
    - Manual trigger only (`trigger: "manual"`)
 
-3. **v3.0.0-rc**: Onboarding integration
+3. **v2.10.0-rc**: Onboarding integration
    - `aime reasoning-session --bootstrap` (3-market selection + chain)
    - `aime onboard` end-step prints bootstrap hint
    - `aime start` checks `bootstrap_completed_at`
 
-4. **v3.0.0**: Ongoing triggers + decide_trade integration
+4. **v2.10.0**: Ongoing triggers + decide_trade integration
    - Daemon-side trigger checks (`new_category`, `low_confidence`, …)
    - Outbox `reasoning_request` events
    - `aime reasoning pause|resume|pending`
    - `starter-agent-python` `decide_trade` change to inject artifacts
    - `aime reasoning compact` (manual + auto every 10 sessions)
 
-Each phase is independently shippable. v3.0.0-beta alone is already
+Each phase is independently shippable. v2.10.0-beta alone is already
 useful (manual reasoning sessions); the rest is icing.
 
 ## Resolved decisions (2026-05-22)
