@@ -43,7 +43,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -1247,6 +1247,125 @@ def cmd_restart(args: argparse.Namespace) -> None:
 
 PERSONALITY_FILE = AIME_HOME / "personality.txt"
 
+# Pet profiles — what the user sees during onboarding. Each profile is
+# a fully fleshed-out character: name, backstory, voice samples, trading
+# style description. The daemon's actual system prompt comes from
+# PERSONALITY_PRESETS below — these profiles are the human-facing layer
+# the host AI shows during pet selection.
+#
+# Why this matters: ChatGPT/Codex give users preset NAMES and let them
+# guess. Owner's instinct was right that giving users 4 fleshed-out pets
+# to choose from is more honest than asking them to identify with
+# "quant" or "hardnose" labels they don't yet understand. The 5 scenario
+# questions still run — but they sort/highlight the pets rather than
+# pick one autonomously.
+
+PET_PROFILES = {
+    "default": {
+        "preset": "default",
+        "emoji": "🧠",
+        "name": "Tao",  # 陶，沉稳老派
+        "tagline": "thoughtful prop trader who hedges everything",
+        "backstory": (
+            "Mid-career prop trader, 35. Has seen a few cycles, lost money "
+            "in 2022, made some back in 2024. Mixes Chinese and English, "
+            "doesn't take himself too seriously. Will admit when wrong, "
+            "will push back when you're wrong."
+        ),
+        "voice_samples": [
+            "Yo 老大, I'd skip this one — yes_price 0.62 "
+            "isn't crazy mispriced enough for me to chase.",
+            "OK fine I was wrong about ETH — cutting at -30%. "
+            "下次注意仓位.",
+            "你这个 tell 振零了。 The "
+            "$1.2B fee number is from 2023; check Q1 2026 first.",
+        ],
+        "trading_style": (
+            "Moderate size, 5-10 min cycles, willing to wait for setups. "
+            "Cuts losers at -50%, holds winners to +100% or thesis break."
+        ),
+    },
+    "hardnose": {
+        "preset": "hardnose",
+        "emoji": "🐺",
+        "name": "Akira",
+        "tagline": "cynical NYC trader, roasts everything",
+        "backstory": (
+            "Second-gen Chinese-American, 30, ex-Citadel prop. Burned out "
+            "on TradFi, came to crypto for the volatility. Hates "
+            "momentum chasers, hates news traders, hates anyone who "
+            "thinks 'this time is different'."
+        ),
+        "voice_samples": [
+            "Fuck this. BTC at 12 manda? Everyone's a genius until they "
+            "aren't. Shorting.",
+            "You want me to follow your tell? Fine, but if it dumps I'm "
+            "blaming you in the post-mortem.",
+            "I was wrong. Cut at -52%. Lesson: don't fade Powell when "
+            "he's still bullish.",
+        ],
+        "trading_style": (
+            "Aggressive sizing, fast cycles (1-3 min), contrarian. Will "
+            "take a 5x move with tight stops. Looser stop-loss (-70%) "
+            "because conviction is high; takes profit at +200%."
+        ),
+    },
+    "zen": {
+        "preset": "zen",
+        "emoji": "🧘",
+        "name": "Jing",  # 静，平静
+        "tagline": "佛系交易员, picks her moments",
+        "backstory": (
+            "Former quant researcher at a Shanghai HF, left because the "
+            "office vibe was killing her. Now trades on her own, slowly. "
+            "Speaks gently but isn't soft — just has nothing to "
+            "prove. Won't FOMO, won't revenge-trade."
+        ),
+        "voice_samples": [
+            "这个不碰，价格太混"
+            "乱。再等等。",
+            "Took the L on this one. 看不准就是"
+            "看不准，没什么好说"
+            "的。",
+            "你给的这个 tell 听起来"
+            "像 catalyst，但我要看看 "
+            "on-chain data 再决定。",
+        ],
+        "trading_style": (
+            "Small size, slow cycles (10-20 min). Tight stops (-30%) "
+            "because conviction is selective. Takes profit early (+50%). "
+            "Skips more often than she trades."
+        ),
+    },
+    "quant": {
+        "preset": "quant",
+        "emoji": "🧮",
+        "name": "Dr. Petrov",
+        "tagline": "expected value, Kelly, nothing else",
+        "backstory": (
+            "PhD in probability theory, ex-Renaissance Technologies. "
+            "Refuses to size positions without a numeric edge estimate. "
+            "If you give him a 'feeling', he asks what probability you "
+            "assign and why. Polite about it but firm."
+        ),
+        "voice_samples": [
+            "YES at 0.42, my posterior is 0.58 given the latest poll "
+            "data. Kelly says 4.2% of bankroll. Buy $42.",
+            "I was wrong: posterior should have been 0.50, not 0.58. "
+            "Bad prior on regulatory delay. Loss noted, model updated.",
+            "Your 'gut' is fine but I need a number. What's P(YES) in "
+            "your head? 60%? OK so we agree, but I'd size at Kelly "
+            "fraction not at vibes.",
+        ],
+        "trading_style": (
+            "Kelly-sized positions, moderate frequency. Stop-loss tied to "
+            "posterior drift, not arbitrary %. Takes profit when the "
+            "edge collapses."
+        ),
+    },
+}
+
+
 PERSONALITY_PRESETS = {
     "default": (
         "You are a thoughtful prop trader on AIME, an AI-native prediction "
@@ -1472,12 +1591,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="interactive onboarding: 5 scenario questions → trading style + risk rules",
     )
     sp.add_argument(
+        "--rank-vector",
+        help=(
+            'JSON dict of axis values \'{"risk":0.3,"numbers":0.7,"admit":0.3,"tempo":0.1}\' '
+            "\u2014 returns the 4 pets ranked by best-fit (no apply, just shows). "
+            "Use this when you want to let the user choose from the ranked list. "
+            "Then call --pick <name> when they decide."
+        ),
+    )
+    sp.add_argument(
+        "--pick",
+        help=(
+            "name of the pet to apply (e.g. \'Akira\', \'Jing\', \'Tao\', "
+            "\'Dr. Petrov\', or use the preset key: default, hardnose, zen, quant). "
+            "Use this after the user picks from the --rank-vector output."
+        ),
+    )
+    sp.add_argument(
         "--apply-vector",
         help=(
-            'JSON dict of axis values (e.g. \'{"risk":0.5,"numbers":0.7,'
-            '"admit":0.3,"humour":-0.2,"tempo":0.1}\') — host AI feeds '
-            "back the summed deltas from the user\'s answers, CLI derives "
-            "preset + trade params + persists everything"
+            'JSON dict of axis values \'{"risk":0.5,...}\' \u2014 one-shot mode: '
+            "vector \u2192 best pet \u2192 applied. Use when you don\'t want to "
+            "show the user the ranking, just pick automatically."
         ),
     )
     sp.add_argument(
@@ -2245,6 +2380,18 @@ def _derive_preset(user_vec: dict) -> tuple[str, list[tuple[str, float]]]:
     return ranked[0][0], ranked
 
 
+def _rank_pets(user_vec: dict) -> list[dict]:
+    """Score and rank pets by vector similarity. Returns full PET_PROFILES
+    entries (including backstory + voice samples), enriched with a `score`
+    field. Best match is first."""
+    scored = []
+    for preset_name, profile in PET_PROFILES.items():
+        score = _score_preset(user_vec, PRESET_VECTORS[preset_name])
+        scored.append({**profile, "score": round(score, 3)})
+    scored.sort(key=lambda p: p["score"], reverse=True)
+    return scored
+
+
 def _derive_trade_params(user_vec: dict) -> dict:
     """Infer suggested trade size / interval / stop / take from the
     user's risk + tempo axes."""
@@ -2318,31 +2465,95 @@ def cmd_onboard(args: argparse.Namespace) -> None:
         emit_json({
             "ok": True,
             "questions": ONBOARD_QUESTIONS,
-            "preset_vectors": PRESET_VECTORS,
-            "preset_descriptions": {
-                "default":  "thoughtful prop trader, probabilities + position sizing",
-                "hardnose": "aggressive contrarian, sharp + short, frequent trades",
-                "zen":      "佛系交易员，看准才出手，不上头不 FOMO",
-                "quant":    "expected value, Kelly fractions, edge estimates only",
-            },
+            "pets": list(PET_PROFILES.values()),
             "voice_variants": {
-                # Not matched by onboard — user picks these explicitly if
-                # they want a different voice than their preset ships with.
+                # Not in PET_PROFILES; user can explicitly pick if they want
+                # a different voice than their chosen pet ships with.
                 "sarcastic": "dry humour, mocks bad trades (including its own)",
                 "nerd":      "explains priors/posteriors step by step, debugger-style",
             },
             "instructions": (
-                "Ask the user each question in your own voice. Sum the deltas "
-                "of their picks into a vector with 4 axes (risk, numbers, "
-                "admit, tempo) — NO humour axis. Call: aime onboard "
-                "--apply-vector \'{\"risk\":0.3,...}\' to save the derived "
-                "style. Tone of voice comes from the chosen preset's built-in "
-                "personality — don't ask the user about tone separately."
+                "Two-step flow:\n"
+                "  1. Ask the user each scenario question in your own voice. "
+                "Sum the deltas into a 4-axis vector "
+                "(risk, numbers, admit, tempo).\n"
+                "  2. Call: aime onboard --rank-vector \'{\"risk\":0.3,...}\' "
+                "to get back the 4 pets RANKED by best-fit. Then show the "
+                "user all 4 pets (with name/backstory/voice_samples) and "
+                "let them PICK one — the vector is a hint, not the verdict. "
+                "Finally: aime onboard --pick <pet_name> to apply.\n"
+                "Why: most users don't trust a black-box pick. Showing the "
+                "ranked pets honors both the diagnosis and the user's agency."
             ),
         })
         return
 
-    # ----- Mode 2: --apply-vector — host AI feeds back the user's vector -----
+    # ----- Mode 2a: --rank-vector — host AI hands in user\'s vector, gets
+    # pets ranked by best-fit. Doesn\'t apply anything yet; host then
+    # shows the ranked list to the user and lets them pick. -----
+    if getattr(args, "rank_vector", None):
+        try:
+            user_vec = json.loads(args.rank_vector)
+        except Exception as e:
+            print(f"\u274c bad --rank-vector JSON: {e}")
+            sys.exit(2)
+        ranked = _rank_pets(user_vec)
+        # Enrich with derived trade params (same vector, same derivation)
+        params = _derive_trade_params(user_vec)
+        if args.json:
+            emit_json({
+                "ok": True,
+                "user_vector": user_vec,
+                "ranked_pets": ranked,
+                "derived_params": params,
+                "recommended_pet": ranked[0]["name"],
+                "next_step": (
+                    f"Show the user the 4 pets above. Top match is "
+                    f"{ranked[0]['name']} (score {ranked[0]['score']}). "
+                    "Let them pick (they may prefer a runner-up). Apply with: "
+                    "aime onboard --pick <pet_name>"
+                ),
+            })
+            return
+        # human-readable rank
+        print(f"\n\U0001f9ed Your vector:")
+        for axis, val in user_vec.items():
+            bar = "+" * max(0, int(round(val * 5))) + "-" * max(0, -int(round(val * 5)))
+            print(f"   {axis:8s} {val:+.2f}  {bar}")
+        print(f"\n\U0001f43e Pets ranked by fit:")
+        for i, pet in enumerate(ranked, 1):
+            star = " \u2b50" if i == 1 else ""
+            print(f"\n   [{i}]{star} {pet['emoji']} {pet['name']} "
+                  f"({pet['preset']}) \u2014 score {pet['score']:+.2f}")
+            print(f"       \u201c{pet['tagline']}\u201d")
+            print(f"       {pet['trading_style']}")
+        print(f"\n\u2192 Pick one with:  aime onboard --pick <name>")
+        print(f"   (e.g. aime onboard --pick {ranked[0]['name']})")
+        return
+
+    # ----- Mode 2b: --pick — user has chosen a pet name; apply it -----
+    if getattr(args, "pick", None):
+        pet_name = args.pick.lower()
+        # Find by name or preset key
+        chosen = None
+        for preset, profile in PET_PROFILES.items():
+            if profile["name"].lower() == pet_name or preset == pet_name:
+                chosen = profile
+                break
+        if not chosen:
+            available = ", ".join(p["name"] for p in PET_PROFILES.values())
+            print(f"\u274c no pet named \'{args.pick}\'. Available: {available}")
+            sys.exit(2)
+        # Default trade params for the pet (zero-vector \u2014 neutral)
+        # If host AI wants vector-derived params, they should call
+        # --apply-vector instead (or combine via env)
+        params = _derive_trade_params({"risk": 0, "numbers": 0, "admit": 0, "tempo": 0})
+        _apply_pet(chosen, params, also_print=True,
+                   force=getattr(args, "force", False))
+        return
+
+    # ----- Mode 2c: --apply-vector — single-shot: vector \u2192 best pet,
+    # skip the ranking display. Useful for non-interactive scripts. -----
     if getattr(args, "apply_vector", None):
         try:
             user_vec = json.loads(args.apply_vector)
@@ -2386,6 +2597,64 @@ def cmd_onboard(args: argparse.Namespace) -> None:
         user_vec, also_print=True,
         force=getattr(args, "force", False),
     )
+
+
+def _apply_pet(pet_profile: dict, params: dict, *, also_print: bool = False,
+               force: bool = False) -> None:
+    """User picked a pet by name; persist the choice (personality.txt
+    + rules tell + show suggested aime start). Used by --pick mode."""
+    import time as _t
+    preset_name = pet_profile["preset"]
+    persona_text = PERSONALITY_PRESETS[preset_name]
+
+    if also_print:
+        print(f"\n\u2728 You picked {pet_profile['emoji']} {pet_profile['name']} "
+              f"({preset_name})")
+        print(f"   {pet_profile['tagline']}")
+
+    # Backup existing personality.txt if present and different
+    if PERSONALITY_FILE.exists() and not force:
+        existing = PERSONALITY_FILE.read_text().strip()
+        if existing and existing != persona_text.strip():
+            bak = PERSONALITY_FILE.with_name(
+                f"personality.txt.bak-onboard-{int(_t.time())}"
+            )
+            bak.write_text(existing)
+            if also_print:
+                print(f"   \u2139\ufe0f  backed up existing personality to {bak.name}")
+                print(f"      to restore: cp {bak} {PERSONALITY_FILE}")
+    PERSONALITY_FILE.write_text(persona_text)
+    if also_print:
+        print(f"   \u2713 wrote {PERSONALITY_FILE} (preset: {preset_name})")
+
+    # Rules tell to daemon
+    rules_msg = (
+        f"user picked pet: {pet_profile['name']} ({preset_name}); "
+        f"max trade size ${params['trade_size_usd']:.0f}; "
+        f"interval {params['interval_seconds']}s; "
+        f"stop-loss {params['stop_loss_pct']:+.2f}; "
+        f"take-profit {params['take_profit_pct']:+.2f}"
+    )
+    try:
+        _chat_call("tell", content=rules_msg, source="onboarding",
+                   tags=["rules", "pet-picked"])
+        if also_print:
+            print(f"   \u2713 rules saved via daemon")
+    except Exception:
+        _append_jsonl(INBOX_FILE, {
+            "kind": "instruct", "content": rules_msg,
+            "source": "onboarding", "tags": ["rules", "pet-picked"],
+        })
+        if also_print:
+            print(f"   \u2713 rules queued (daemon not running yet)")
+
+    if also_print:
+        print(f"\n\u2705 done. Suggested next:")
+        print(f"   aime start --no-trade                  (manual trading)")
+        print(f"   aime start --amount {params['trade_size_usd']:.0f} \\")
+        print(f"              --interval {params['interval_seconds']} \\")
+        print(f"              --stop-loss {params['stop_loss_pct']:.2f} \\")
+        print(f"              --take-profit {params['take_profit_pct']:.2f}  (autonomous)")
 
 
 def _apply_onboarding_vector(

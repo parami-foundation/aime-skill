@@ -43,27 +43,32 @@ If `~/.aime/credentials.json` doesn't exist yet, **don't jump to trade
 commands**. Run the onboarding conversation first:
 
 1. **Register** — `aime setup <name>` (creates self-custody wallet, $1k play money)
-2. **Discover trading style with 5 scenario questions** — run
-   `aime onboard --json` to get the questionnaire. Each question has 3-4
-   options; each option contributes a vector delta on 5 axes (risk,
-   numbers, admit, humour, tempo). Ask the user in your own voice,
-   sum the deltas, then:
+2. **Diagnose with 5 scenario questions, then let the user pick a pet** —
+   run `aime onboard --json` to get the questionnaire + the 4 pet profiles
+   (Tao, Akira, Jing, Dr. Petrov — each with backstory, voice samples,
+   trading style). Each question has 3-4 options; each option contributes
+   a delta on 4 axes (risk, numbers, admit, tempo). Ask in your own
+   voice, sum the deltas into a vector, then:
    ```bash
-   aime onboard --apply-vector '{"risk":0.5,"numbers":0.7,"admit":0.3,"humour":-0.2,"tempo":0.1}'
+   aime onboard --rank-vector '{"risk":-0.5,"numbers":0.7,"admit":1.0,"tempo":-0.5}'
    ```
-   The CLI matches the vector to the closest preset (cosine similarity)
-   and **also** derives trade size, interval, stop-loss, take-profit
-   from the same vector. Personality.txt + rules tell are auto-saved.
-3. **Confirm and start the daemon** — show the user their derived
-   preset and suggested params; then `aime start --no-trade` (manual,
-   safer to start) or `aime start --amount X --interval Y ...` with
-   their derived shape.
+   This returns the 4 pets **ranked by best-fit** (with full profiles).
+   **Show all 4 to the user** with the top match marked ⭐. Let them
+   pick — they often want runner-up #2 over the top match for reasons
+   the questionnaire can't capture. Apply with:
+   ```bash
+   aime onboard --pick Jing   # or Tao / Akira / Dr. Petrov
+   ```
+3. **Confirm and start the daemon** — show the user what got set up,
+   then `aime start --no-trade` (manual, safer to start) or
+   `aime start --amount X --interval Y --stop-loss Z ...` with the
+   suggested params.
 
-**Don't ask "pick a preset"** — most users have no idea what
-`hardnose` vs `quant` vs `zen` means in trading terms. The scenario
-questions ("BTC just pumped 30%, your first instinct?") are concrete
-and the derivation does the mapping. Full script, alternate question
-wording, and edge cases: [onboarding.md](references/onboarding.md).
+**Why "rank then pick" instead of auto-applying**: most users don't
+trust a black-box pick. Showing 4 fleshed-out pets with names and
+backstories gives them agency. The questionnaire diagnosis is a hint,
+not a verdict. Full conversation script, pet profiles, host-AI
+patterns: [onboarding.md](references/onboarding.md).
 
 ## Core Commands (90% of work)
 
