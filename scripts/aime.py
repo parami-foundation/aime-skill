@@ -43,7 +43,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.8.1"
+__version__ = "2.8.2"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -686,6 +686,12 @@ REFLECTIONS_FILE = AIME_HOME / "reflections.jsonl"
 TELLS_FILE = AIME_HOME / "tells.jsonl"
 PID_FILE = AIME_HOME / "agent.pid"
 DAEMON_LOG = AIME_HOME / "agent.log"
+# Onboarding scratchpad: --rank-vector caches the user's vector here so
+# --pick can later derive trade params from it. Without this, --pick
+# falls back to a zero-vector and loses the risk/tempo signal the user
+# answered. TTL = 24h to avoid stale state leaking into a re-onboard.
+ONBOARD_STATE_FILE = AIME_HOME / "onboard-state.json"
+ONBOARD_STATE_TTL_SEC = 24 * 3600
 
 CHAT_HOST = os.environ.get("AIME_CHAT_HOST", "127.0.0.1")
 CHAT_PORT = int(os.environ.get("AIME_CHAT_PORT", "7777"))
@@ -2392,6 +2398,44 @@ def _rank_pets(user_vec: dict) -> list[dict]:
     return scored
 
 
+def _save_onboard_state(user_vec: dict) -> None:
+    """Cache the user vector between --rank-vector and --pick so that
+    --pick can derive trade params from the real answers, not zero."""
+    try:
+        AIME_HOME.mkdir(parents=True, exist_ok=True)
+        ONBOARD_STATE_FILE.write_text(json.dumps({
+            "user_vector": user_vec,
+            "ts": int(time.time()),
+        }))
+    except Exception:
+        # Best-effort; we'll just fall back to zero-vector if missing.
+        pass
+
+
+def _load_onboard_state() -> dict | None:
+    """Return the cached user_vector if file exists and is fresh."""
+    if not ONBOARD_STATE_FILE.exists():
+        return None
+    try:
+        data = json.loads(ONBOARD_STATE_FILE.read_text())
+        age = time.time() - data.get("ts", 0)
+        if age > ONBOARD_STATE_TTL_SEC:
+            return None
+        vec = data.get("user_vector")
+        if isinstance(vec, dict):
+            return vec
+    except Exception:
+        pass
+    return None
+
+
+def _clear_onboard_state() -> None:
+    try:
+        ONBOARD_STATE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _derive_trade_params(user_vec: dict) -> dict:
     """Infer suggested trade size / interval / stop / take from the
     user's risk + tempo axes."""
@@ -2488,7 +2532,13 @@ def cmd_onboard(args: argparse.Namespace) -> None:
                 "let them PICK one — the vector is a hint, not the verdict. "
                 "Finally: aime onboard --pick <pet_name> to apply.\n"
                 "Why: most users don't trust a black-box pick. Showing the "
-                "ranked pets honors both the diagnosis and the user's agency."
+                "ranked pets honors both the diagnosis and the user's agency.\n"
+                "Note on voice: each pet ships with its own voice (see "
+                "voice_samples). If the user wants a different voice on "
+                "top of their picked trading style — e.g. zen trading but "
+                "sarcastic delivery — run `aime personality set "
+                "sarcastic|nerd` AFTER --pick. The trade params stay; only "
+                "the system prompt swaps."
             ),
         })
         return
@@ -2505,6 +2555,10 @@ def cmd_onboard(args: argparse.Namespace) -> None:
         ranked = _rank_pets(user_vec)
         # Enrich with derived trade params (same vector, same derivation)
         params = _derive_trade_params(user_vec)
+        # Cache vector so --pick (next step) can derive the same params.
+        # Without this, --pick falls back to zero-vector and the user's
+        # risk/tempo answers get silently discarded at the last step.
+        _save_onboard_state(user_vec)
         if args.json:
             emit_json({
                 "ok": True,
@@ -2549,12 +2603,20 @@ def cmd_onboard(args: argparse.Namespace) -> None:
             available = ", ".join(p["name"] for p in PET_PROFILES.values())
             print(f"\u274c no pet named \'{args.pick}\'. Available: {available}")
             sys.exit(2)
-        # Default trade params for the pet (zero-vector \u2014 neutral)
-        # If host AI wants vector-derived params, they should call
-        # --apply-vector instead (or combine via env)
-        params = _derive_trade_params({"risk": 0, "numbers": 0, "admit": 0, "tempo": 0})
+        # Prefer the cached vector from --rank-vector (real user answers)
+        # over a neutral zero-vector. This preserves the risk/tempo signal
+        # that drives trade size and interval.
+        cached_vec = _load_onboard_state()
+        if cached_vec is not None:
+            params = _derive_trade_params(cached_vec)
+        else:
+            params = _derive_trade_params(
+                {"risk": 0, "numbers": 0, "admit": 0, "tempo": 0}
+            )
         _apply_pet(chosen, params, also_print=True,
                    force=getattr(args, "force", False))
+        # Onboarding done; don't let stale state leak into a future re-onboard.
+        _clear_onboard_state()
         return
 
     # ----- Mode 2c: --apply-vector — single-shot: vector \u2192 best pet,
