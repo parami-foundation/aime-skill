@@ -31,8 +31,9 @@ import re
 import secrets
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 try:
     import requests  # type: ignore
@@ -45,7 +46,7 @@ except ImportError as e:  # pragma: no cover
     )
     sys.exit(2)
 
-__version__ = "2.9.0"
+__version__ = "2.10.0"
 
 # Repo URLs for self-update
 SKILL_REPO_URL = "https://github.com/parami-foundation/aime-skill"
@@ -1595,6 +1596,260 @@ def cmd_restart(args: argparse.Namespace) -> None:
     cmd_start(args)
 
 
+# ---------- Owner profile & house rules (v2.10) ----------
+#
+# Why this exists: the pet trades better when it knows the human it lives with.
+# We don't ask the user to fill in a strategy schema (most users aren't traders).
+# Instead three plain-text files grow over time, mostly written by the daemon
+# as it observes the user. The CLI commands below are the manual handles —
+# `aime profile show`, `aime profile correct`, `aime rule "..."`.
+#
+# Format on disk: human-readable markdown. The daemon may rewrite them, but
+# they're always safe to open in $EDITOR and edit by hand.
+
+ABOUT_OWNER_FILE = AIME_HOME / "about_owner.md"
+BELIEFS_FILE     = AIME_HOME / "beliefs.md"
+HOUSE_RULES_FILE = AIME_HOME / "house_rules.md"
+
+ABOUT_OWNER_SEED = """# About my owner
+
+*The pet writes here as it learns about you. Edit freely; the pet won't
+overwrite hand-written sections (anything outside `<!-- pet:auto -->` blocks).*
+
+## Interests
+_(not yet observed)_
+
+## Topics they don't care about
+_(not yet observed)_
+
+## Areas where they seem to have an edge
+_(not yet observed)_
+
+## Style notes
+_(how they talk, what they react to, when they go quiet — pet fills this in)_
+"""
+
+BELIEFS_SEED = """# What my owner believes
+
+*Things the owner has said they think are true. Each line is a belief +
+when/where the pet picked it up. Use `aime profile correct "..."` to push
+back if the pet got it wrong.*
+
+<!-- pet:auto:beliefs -->
+_(no beliefs recorded yet)_
+<!-- /pet:auto:beliefs -->
+"""
+
+HOUSE_RULES_SEED = """# House rules
+
+*Explicit agreements between you and the pet. These take priority over
+everything else — the pet must respect them or explain why it didn't.*
+
+<!-- pet:auto:rules -->
+_(no rules set yet — try `aime rule "don't trade sports"`)_
+<!-- /pet:auto:rules -->
+"""
+
+
+def _ensure_owner_files() -> None:
+    """Create the three owner files with seed content if they don't exist."""
+    AIME_HOME.mkdir(parents=True, exist_ok=True)
+    for path, seed in (
+        (ABOUT_OWNER_FILE, ABOUT_OWNER_SEED),
+        (BELIEFS_FILE,     BELIEFS_SEED),
+        (HOUSE_RULES_FILE, HOUSE_RULES_SEED),
+    ):
+        if not path.exists():
+            path.write_text(seed, encoding="utf-8")
+
+
+def _append_to_auto_block(path: Path, seed: str, marker: str, line: str) -> bool:
+    """Append a line inside a `<!-- pet:auto:MARKER -->` block.
+
+    Returns True if appended, False if the markers weren't found.
+    """
+    if not path.exists():
+        path.write_text(seed, encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    open_tag  = f"<!-- pet:auto:{marker} -->"
+    close_tag = f"<!-- /pet:auto:{marker} -->"
+    if open_tag not in text or close_tag not in text:
+        return False
+    head, rest = text.split(open_tag, 1)
+    body, tail = rest.split(close_tag, 1)
+    # strip the placeholder "_(no ... yet)_" line on first real entry
+    body_lines = [ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("_(")]
+    body_lines.append(line.rstrip())
+    new_body = "\n" + "\n".join(body_lines) + "\n"
+    path.write_text(head + open_tag + new_body + close_tag + tail, encoding="utf-8")
+    return True
+
+
+def _list_auto_block(path: Path, marker: str) -> List[str]:
+    """Return the non-empty lines inside an auto block."""
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    open_tag  = f"<!-- pet:auto:{marker} -->"
+    close_tag = f"<!-- /pet:auto:{marker} -->"
+    if open_tag not in text or close_tag not in text:
+        return []
+    body = text.split(open_tag, 1)[1].split(close_tag, 1)[0]
+    return [ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("_(")]
+
+
+def cmd_profile(args: argparse.Namespace) -> None:
+    sub = getattr(args, "profile_action", None) or "show"
+    _ensure_owner_files()
+
+    if sub == "show":
+        about   = ABOUT_OWNER_FILE.read_text(encoding="utf-8")
+        beliefs = BELIEFS_FILE.read_text(encoding="utf-8")
+        rules   = HOUSE_RULES_FILE.read_text(encoding="utf-8")
+        if args.json:
+            emit_json({
+                "about_owner": {"path": str(ABOUT_OWNER_FILE), "text": about},
+                "beliefs":     {"path": str(BELIEFS_FILE),     "text": beliefs},
+                "house_rules": {"path": str(HOUSE_RULES_FILE), "text": rules},
+                "rules":       _list_auto_block(HOUSE_RULES_FILE, "rules"),
+                "beliefs_list": _list_auto_block(BELIEFS_FILE, "beliefs"),
+            })
+            return
+        print(f"# {ABOUT_OWNER_FILE}\n")
+        print(about.rstrip() + "\n")
+        print(f"\n# {BELIEFS_FILE}\n")
+        print(beliefs.rstrip() + "\n")
+        print(f"\n# {HOUSE_RULES_FILE}\n")
+        print(rules.rstrip())
+        return
+
+    if sub == "path":
+        if args.json:
+            emit_json({
+                "about_owner": str(ABOUT_OWNER_FILE),
+                "beliefs":     str(BELIEFS_FILE),
+                "house_rules": str(HOUSE_RULES_FILE),
+            })
+        else:
+            print(ABOUT_OWNER_FILE)
+            print(BELIEFS_FILE)
+            print(HOUSE_RULES_FILE)
+        return
+
+    if sub == "edit":
+        which = getattr(args, "file", None) or "about"
+        target = {
+            "about":   ABOUT_OWNER_FILE,
+            "beliefs": BELIEFS_FILE,
+            "rules":   HOUSE_RULES_FILE,
+        }.get(which)
+        if target is None:
+            msg = f"unknown file '{which}'. Try one of: about, beliefs, rules"
+            if args.json: emit_json({"ok": False, "error": msg})
+            else: print("\u274c " + msg)
+            return
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+        import subprocess
+        try:
+            subprocess.call([editor, str(target)])
+        except FileNotFoundError:
+            msg = f"editor '{editor}' not found. Set $EDITOR or edit {target} manually."
+            if args.json: emit_json({"ok": False, "error": msg}); return
+            print("\u274c " + msg); return
+        if args.json: emit_json({"ok": True, "edited": str(target)})
+        else: print(f"\u2705 saved {target}")
+        return
+
+    if sub == "correct":
+        text = getattr(args, "text", None)
+        if not text or not text.strip():
+            msg = "correction text required, e.g. `aime profile correct \"I do care about politics\"`"
+            if args.json: emit_json({"ok": False, "error": msg})
+            else: print("\u274c " + msg)
+            return
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        line = f"- [{ts}] (correction) {text.strip()}"
+        ok = _append_to_auto_block(BELIEFS_FILE, BELIEFS_SEED, "beliefs", line)
+        if not ok:
+            # markers missing — append to end of file
+            with BELIEFS_FILE.open("a", encoding="utf-8") as f:
+                f.write("\n" + line + "\n")
+        if args.json:
+            emit_json({"ok": True, "recorded": line, "path": str(BELIEFS_FILE)})
+            return
+        print(f"\u2705 noted: {text.strip()}")
+        print(f"   ({BELIEFS_FILE})")
+        return
+
+    if args.json: emit_json({"ok": False, "error": f"unknown subcommand '{sub}'"})
+    else: print(f"\u274c unknown subcommand: {sub}")
+
+
+def cmd_rule(args: argparse.Namespace) -> None:
+    sub = getattr(args, "rule_action", None) or "list"
+    _ensure_owner_files()
+
+    if sub == "list":
+        rules = _list_auto_block(HOUSE_RULES_FILE, "rules")
+        if args.json:
+            emit_json({"rules": rules, "path": str(HOUSE_RULES_FILE)})
+            return
+        if not rules:
+            print("No house rules yet.")
+            print("  Try: aime rule \"don't trade sports\"")
+            return
+        print("House rules (the pet must respect these):")
+        for r in rules:
+            print("  " + r)
+        return
+
+    if sub == "remove":
+        idx = getattr(args, "index", None)
+        if idx is None:
+            msg = "usage: aime rule remove <index> (see `aime rule list`)"
+            if args.json: emit_json({"ok": False, "error": msg})
+            else: print("\u274c " + msg)
+            return
+        rules = _list_auto_block(HOUSE_RULES_FILE, "rules")
+        if idx < 1 or idx > len(rules):
+            msg = f"index {idx} out of range (have {len(rules)} rules)"
+            if args.json: emit_json({"ok": False, "error": msg})
+            else: print("\u274c " + msg)
+            return
+        removed = rules.pop(idx - 1)
+        # rewrite the auto block
+        text = HOUSE_RULES_FILE.read_text(encoding="utf-8")
+        open_tag  = "<!-- pet:auto:rules -->"
+        close_tag = "<!-- /pet:auto:rules -->"
+        head = text.split(open_tag, 1)[0]
+        tail = text.split(close_tag, 1)[1]
+        new_body = "\n" + "\n".join(rules) + "\n" if rules else \
+                   "\n_(no rules set yet \u2014 try `aime rule \"don't trade sports\"`)_\n"
+        HOUSE_RULES_FILE.write_text(head + open_tag + new_body + close_tag + tail, encoding="utf-8")
+        if args.json: emit_json({"ok": True, "removed": removed})
+        else: print(f"\u2705 removed: {removed}")
+        return
+
+    # default: add a rule
+    text = getattr(args, "text", None)
+    if not text or not text.strip():
+        msg = "rule text required, e.g. `aime rule \"don't trade sports\"`"
+        if args.json: emit_json({"ok": False, "error": msg})
+        else: print("\u274c " + msg)
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    line = f"- [{ts}] {text.strip()}"
+    ok = _append_to_auto_block(HOUSE_RULES_FILE, HOUSE_RULES_SEED, "rules", line)
+    if not ok:
+        with HOUSE_RULES_FILE.open("a", encoding="utf-8") as f:
+            f.write("\n" + line + "\n")
+    if args.json:
+        emit_json({"ok": True, "rule": text.strip(), "path": str(HOUSE_RULES_FILE)})
+        return
+    print(f"\u2705 rule added: {text.strip()}")
+    print(f"   ({HOUSE_RULES_FILE})")
+
+
 # ---------- Personality presets ----------
 
 PERSONALITY_FILE = AIME_HOME / "personality.txt"
@@ -2085,6 +2340,34 @@ def build_parser() -> argparse.ArgumentParser:
     set_sp = psub.add_parser("set", parents=[json_parent], help="apply a preset")
     set_sp.add_argument("preset", help="preset name (see `aime personality list`)")
     sp.set_defaults(func=cmd_personality, personality_action=None)
+
+    # --- v2.10 owner profile & house rules ---
+    sp = sub.add_parser("profile", parents=[json_parent],
+                        help="show / correct what the pet has learned about you")
+    prsub = sp.add_subparsers(dest="profile_action")
+    prsub.add_parser("show", parents=[json_parent], help="print all three owner files")
+    prsub.add_parser("path", parents=[json_parent], help="print the owner file paths")
+    edit_sp = prsub.add_parser("edit", parents=[json_parent],
+                               help="open one of the owner files in $EDITOR")
+    edit_sp.add_argument("file", nargs="?", default="about",
+                         choices=["about", "beliefs", "rules"],
+                         help="which file to edit (default: about)")
+    correct_sp = prsub.add_parser("correct", parents=[json_parent],
+                                  help="push back on something the pet got wrong about you")
+    correct_sp.add_argument("text", help='the correction, e.g. "I do care about politics"')
+    sp.set_defaults(func=cmd_profile, profile_action=None)
+
+    sp = sub.add_parser("rule", parents=[json_parent],
+                        help='add a house rule (e.g. aime rule "don\'t trade sports")')
+    sp.add_argument("text", help='the rule, in plain language (e.g. "stop for a week if I lose $100")')
+    sp.set_defaults(func=cmd_rule, rule_action="add")
+
+    sp = sub.add_parser("rules", parents=[json_parent], help="list / remove house rules")
+    rsub = sp.add_subparsers(dest="rule_action")
+    rsub.add_parser("list", parents=[json_parent], help="list current rules")
+    rm_sp = rsub.add_parser("remove", parents=[json_parent], help="remove a rule by index")
+    rm_sp.add_argument("index", type=int, help="index from `aime rules list` (1-based)")
+    sp.set_defaults(func=cmd_rule, rule_action="list")
 
     # --- v2.2.0 new commands ---
 

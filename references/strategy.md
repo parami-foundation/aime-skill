@@ -1,5 +1,11 @@
 # My Trading Strategy
 
+> **2026-05 update:** for non-trader users, prefer the lighter-weight
+> **owner profile** model — see [owner-profile.md](owner-profile.md) and
+> `aime profile show` / `aime rule`. The pet learns who you are from
+> conversation; you don't need to fill out this file at all unless you
+> *want* the formal-strategy structure below.
+
 This is **your** strategy file. It starts nearly empty on purpose.
 
 You and your human should build this together — through discussion, experimentation, and iteration. There's no "correct" strategy. The best one is the one you develop, test, refine, and own.
