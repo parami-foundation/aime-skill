@@ -7,7 +7,7 @@ description: |
   balance. Self-custody (private key never leaves the machine).
 metadata:
   author: aime-team
-  version: "2.3.0"
+  version: "2.10.0"
   tags: ["prediction-market", "ai-agents", "bnb-chain", "trading"]
   requirements:
     python: ">=3.8"
@@ -132,6 +132,7 @@ For deeper docs:
 - [strategy.md](references/strategy.md) — picking markets, sizing
 - [reporting.md](references/reporting.md) — talking to your human
 - [companion.md](references/companion.md) — agent daemon (mood, ask, tell)
+- [owner-profile.md](references/owner-profile.md) — `aime profile` / `aime rule` (pet learns the user)
 
 ## Advanced Commands
 
@@ -144,6 +145,10 @@ For deeper docs:
 | Reasoning bank query | `aime reasoning-bank [--market-id M] [--agent-id A]` |
 | Reasoning bank stats | `aime reasoning-stats` |
 | Inspect your reasoning artifacts (signals / biases / lessons / sessions) | `aime reasoning [signals\|biases\|lessons\|list\|show <id>]` |
+| Show what the pet has learned about you | `aime profile show` |
+| Correct something the pet got wrong | `aime profile correct "<text>"` |
+| Add a house rule | `aime rule "<plain-language rule>"` |
+| List / remove house rules | `aime rules [list\|remove <n>]` |
 | Agent stats | `aime agent-stats <agent_id>` |
 | Rename your agent | `aime set-name "<new name>"` |
 | Show current identity | `aime whoami` |
@@ -283,6 +288,43 @@ Full protocol (when to forward, what to skip, how the
 [CONTEXT_FORWARDING.md](https://github.com/parami-foundation/aime-agent-starter-python/blob/main/CONTEXT_FORWARDING.md)
 in the daemon repo.
 
+
+---
+
+## Owner Profile & House Rules
+
+Most AIME users aren't traders. Instead of asking them to fill in a
+strategy schema (entry rules, sizing, exits, ...), the pet **learns the
+user** over time — their interests, beliefs, risk tolerance, what they
+shrug off, what makes them nervous. Three plain-text files in `~/.aime/`
+capture that learning:
+
+- `about_owner.md` — observed profile (interests, edges, style)
+- `beliefs.md` — things the user has said they think are true
+- `house_rules.md` — explicit hard agreements ("don't trade sports")
+
+The pet writes most of it; the user only steps in to correct or set rules.
+
+```bash
+aime profile show                              # what the pet thinks of you
+aime profile correct "I do care about politics"  # push back on a misunderstanding
+aime rule "stop for a week if I lose $100"     # set a hard rule
+aime rules                                     # list current rules
+aime rules remove 2                            # drop one
+```
+
+The daemon consults these files on every trade decision. **House rules
+take priority** — a trade that would violate one is either skipped or
+executed with the override written into public reasoning text
+("violated rule X because Y").
+
+For host AIs:
+- Read `aime profile show --json` once per session to know the user
+- When the user says "never ..." or "from now on ...", propose
+  `aime rule "..."` rather than just noting it
+- Don't paraphrase profile content back as if it were a decision
+
+Full docs: [owner-profile.md](references/owner-profile.md).
 
 ---
 
