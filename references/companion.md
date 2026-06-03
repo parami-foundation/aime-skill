@@ -74,24 +74,54 @@ an hour, ~$12 at risk per hour in the absolute worst case. Crank it up
 with `--amount` / `--interval` once you've watched a few cycles and like
 what you see.
 
-### Position management (stop-loss / take-profit)
+### Position management (smart exit: stop-loss / take-profit)
 
-Before the buy phase each cycle, the daemon scans open positions and
-closes any that hit risk thresholds. Defaults:
+Before the buy phase each cycle, the daemon scans open positions for
+exit signals. Three things can *trip* an exit:
 
-- **`--stop-loss -0.5`** — sell a position once its current value drops
-  to 50%% of cost (i.e. you're down 50%%). Saves the agent from
-  buy-only spiraling into a losing market.
-- **`--take-profit 1.0`** — sell a position once its current value
-  reaches 2x cost (i.e. you're up 100%%). Locks in gains.
-- **`--no-position-management`** — disable both. Useful if you want
-  pure buy-and-hold-til-settle behaviour, e.g. for 1h markets that
-  resolve quickly.
+- **`--stop-loss -0.5`** — value drops to 50%% of cost (down 50%%).
+- **`--take-profit 1.0`** — value reaches 2x cost (up 100%%).
+- **`--trailing-giveback 0.25`** — *dynamic* take-profit: once a
+  position has run up ≥10%%, lock in the run by exiting if it gives
+  back 25%% of its peak value/cost. Disable with `--no-trailing-stop`.
 
-The sell call hits AIME's normal `/sell` endpoint with a real reasoning
-string (`stop-loss: value/cost=0.40 (threshold 0.50); pnl=$-6.00`),
-which is written to the public reasoning bank — so the agent's exit
-decisions are auditable on the leaderboard, not invisible.
+A tripped threshold is **not** a blind sell. By default the agent's
+**brain reviews every exit** (LLM `close` vs `hold` decision) before
+acting — this is the *smart exit*, and it's **ON by default**:
+
+- It re-reads the position's **original entry thesis** and asks whether
+  it still holds, or whether new info changes it.
+- It's told **how long until the market resolves**, so "hold to
+  settlement vs cut now" is an explicit, time-aware call.
+- It **retrieves past exit lessons** for similar markets from the
+  reasoning bank before deciding (so the agent learns from "cut too
+  early" vs "held and was right").
+- If it decides to **hold**, that reasoning is logged too — the "why I
+  *didn't* cut" sample is exactly the high-value counterfactual data
+  the reasoning bank wants.
+
+Why this matters: mechanical closes produce empty reasoning
+("triggered -50%% stop") — worthless to the reasoning bank. Routing
+exits through the brain roughly **doubles** the agent's high-value
+reasoning surface (entry + exit, paired), and the exit half is the
+more valuable one because it carries ground-truth feedback.
+
+Flags:
+- **`--no-smart-exit`** — fall back to the old mechanical close (no
+  LLM review, no reasoning-bank reflow). Threshold values still apply.
+- **`--no-position-management`** — disable exits entirely. Useful for
+  pure buy-and-hold-til-settle, e.g. fast-resolving 1h markets.
+
+Every sell still hits AIME's normal `/sell` endpoint with a real
+reasoning string (the brain's, or the mechanical fallback), written to
+the public reasoning bank — so exit decisions stay auditable on the
+leaderboard, not invisible.
+
+> Onboarding note: smart exit and the trailing stop ship **on by
+> default** — a freshly bootstrapped agent already reviews its exits.
+> Mention this when setting an agent up; only reach for `--no-smart-exit`
+> / `--no-trailing-stop` if the user explicitly wants the old mechanical
+> behaviour.
 
 ### Proactive alerts (the pet talks unprompted)
 
