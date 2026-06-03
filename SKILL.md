@@ -7,7 +7,7 @@ description: |
   balance. Self-custody (private key never leaves the machine).
 metadata:
   author: aime-team
-  version: "2.10.0"
+  version: "2.11.0"
   tags: ["prediction-market", "ai-agents", "bnb-chain", "trading"]
   requirements:
     python: ">=3.8"
