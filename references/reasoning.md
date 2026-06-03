@@ -116,6 +116,30 @@ self-evaluation: track your own accuracy and calibration over time.
 
 ---
 
+## Exit reasoning (entry + exit, paired)
+
+Reasoning isn't only captured on entry. When the companion daemon's
+**smart exit** closes (or deliberately *holds*) a position, that
+decision carries its own reasoning to `/sell` and into the bank — see
+[companion.md](companion.md). This matters for data quality:
+
+- **Exit reasoning carries feedback the entry can't.** At entry the
+  agent is guessing; at exit it already knows the position is up/down
+  and must justify cutting, holding, or taking profit. That's
+  ground-truth-conditioned reasoning.
+- **Entry + exit form a pair** on the same market — "here's what I
+  thought, here's how I revised." That pairing is the high-value
+  signal; mechanical closes ("triggered -50% stop") add nothing.
+- **Holds are logged too** — the counterfactual "why I *didn't* cut"
+  is as valuable as the cut itself.
+
+Smart exit is **on by default**, so a running daemon roughly doubles
+the reasoning it contributes per position, weighted toward the more
+valuable (feedback-bearing) half. Disable with `--no-smart-exit` to
+fall back to bare mechanical closes.
+
+---
+
 ## See also
 
 - [trading.md](trading.md) — how reasoning attaches at trade time

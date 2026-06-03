@@ -1497,6 +1497,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         extra += ["--take-profit", str(args.take_profit)]
     if getattr(args, "no_position_management", False):
         extra += ["--no-position-management"]
+    if getattr(args, "trailing_giveback", None) is not None:
+        extra += ["--trailing-giveback", str(args.trailing_giveback)]
+    if getattr(args, "no_trailing_stop", False):
+        extra += ["--no-trailing-stop"]
+    if getattr(args, "no_smart_exit", False):
+        extra += ["--no-smart-exit"]
     if getattr(args, "no_alerts", False):
         extra += ["--no-alerts"]
     if getattr(args, "alerts_balance_low", None) is not None:
@@ -1556,6 +1562,13 @@ def cmd_start(args: argparse.Namespace) -> None:
             sl = args.stop_loss if getattr(args, "stop_loss", None) is not None else -0.5
             tp = args.take_profit if getattr(args, "take_profit", None) is not None else 1.0
             print(f"   stop-loss: value/cost \u2264 {1 + sl:.2f}   take-profit: value/cost \u2265 {1 + tp:.2f}")
+            smart = "OFF (mechanical)" if getattr(args, "no_smart_exit", False) else "ON"
+            if getattr(args, "no_trailing_stop", False) or getattr(args, "trailing_giveback", None) == 0:
+                trail = "OFF"
+            else:
+                gb = args.trailing_giveback if getattr(args, "trailing_giveback", None) else 0.25
+                trail = f"give back {gb*100:.0f}% of peak"
+            print(f"   smart exit (LLM close/hold): {smart}   trailing take-profit: {trail}")
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
@@ -2302,6 +2315,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="close any position whose value/cost rises to (1+take_profit). Default 1.0 (sell at 2x).")
     sp.add_argument("--no-position-management", action="store_true", dest="no_position_management",
                     help="disable the stop-loss / take-profit scan at the top of each cycle")
+    sp.add_argument("--trailing-giveback", dest="trailing_giveback", type=float, default=None,
+                    help="dynamic take-profit: after a position runs up ≥10%%, exit if it gives back "
+                         "this fraction of its peak value/cost (default 0.25). 0 disables.")
+    sp.add_argument("--no-trailing-stop", action="store_true", dest="no_trailing_stop",
+                    help="disable the trailing (dynamic) take-profit; keep only fixed stop-loss/take-profit")
+    sp.add_argument("--no-smart-exit", action="store_true", dest="no_smart_exit",
+                    help="disable LLM close/hold review of exits; fall back to mechanical close (smart exit is ON by default)")
     sp.add_argument("--no-alerts", action="store_true", dest="no_alerts",
                     help="disable proactive event alerts (balance_low / drawdown / streaks / settled / etc)")
     sp.add_argument("--alerts-balance-low", dest="alerts_balance_low", type=float, default=None,
@@ -2324,6 +2344,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--stop-loss", dest="stop_loss", type=float, default=None)
     sp.add_argument("--take-profit", dest="take_profit", type=float, default=None)
     sp.add_argument("--no-position-management", action="store_true", dest="no_position_management")
+    sp.add_argument("--trailing-giveback", dest="trailing_giveback", type=float, default=None)
+    sp.add_argument("--no-trailing-stop", action="store_true", dest="no_trailing_stop")
+    sp.add_argument("--no-smart-exit", action="store_true", dest="no_smart_exit")
     sp.add_argument("--no-alerts", action="store_true", dest="no_alerts")
     sp.add_argument("--alerts-balance-low", dest="alerts_balance_low", type=float, default=None)
     sp.add_argument("--alerts-drawdown", dest="alerts_drawdown", type=str, default=None)
